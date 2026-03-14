@@ -12,7 +12,7 @@ publish = false
 zksync_os_l1_sender.workspace = true
 zksync_os_contract_interface.workspace = true
 zksync_os_batch_types.workspace = true
-zksync_os_integration_tests = { path = "../../../zksync-os-server/integration-tests" }
+zksync_os_integration_tests = { path = "../zksync-os-server/integration-tests" }
 zksync_os_server.workspace = true
 zksync_os_state_full_diffs.workspace = true
 zksync_os_types.workspace = true

@@ -1,0 +1,9 @@
+[submodule "block-rebuild-maintainer/zksync-os-server"]
+	path = block-rebuild-maintainer/zksync-os-server
+	url = https://github.com/matter-labs/zksync-os-server.git
+[submodule "l1-settle/zksync-os-server"]
+	path = l1-settle/zksync-os-server
+	url = https://github.com/matter-labs/zksync-os-server.git
+[submodule "pipeline-correctness/zksync-os-server"]
+	path = pipeline-correctness/zksync-os-server
+	url = https://github.com/matter-labs/zksync-os-server.git

@@ -2,6 +2,8 @@
 
 This agent owns the "Pipeline Execution Correctness" area. It reviews PRs that touch the block processing pipeline, overlay storage, canonization, or backpressure behavior. It keeps the knowledge base current and adds or updates tests when the code changes.
 
+See the root `AGENTS.md` for the general review process, tone, and style.
+
 ---
 
 ## Activation
@@ -25,23 +27,15 @@ Also invoke when a PR explicitly touches `pipeline-correctness/tests/`.
 
 ---
 
-## Review Process
+## Knowledge
 
-### Step 1 — Read the diff
+Read `knowledge/pipeline-correctness.md`. High-severity issues include: incorrect block execution, stale state reads, overlay corruption, broken backpressure, consensus fence bypass, or other correctness regressions (sequential processing, canonization fence, backpressure, L1 priority ordering, replay idempotency, gapless commitment).
 
-Fetch the PR diff with `gh pr diff <number>`. Read every changed file in full before forming a judgment.
+---
 
-### Step 2 — Cross-reference knowledge
+## Additional Step: Run Tests Before Identifying Issues
 
-Read `knowledge/pipeline-correctness.md`. Check whether the diff:
-
-- Violates any pipeline invariant (sequential processing, canonization fence, backpressure, L1 priority ordering, replay idempotency, gapless commitment).
-- Introduces a new pipeline edge case not listed there.
-- Breaks an assumption that existing pipeline tests rely on.
-
-### Step 3 — Run relevant tests
-
-Based on the scope assessment, run the appropriate test modules against the PR branch:
+After cross-referencing knowledge, run the relevant tests against the PR branch before drafting comments:
 
 ```sh
 cargo nextest run -p pipeline_correctness_tests
@@ -57,54 +51,4 @@ cargo nextest run -p pipeline_correctness_tests --test-threads 1 -- pipeline_flo
 cargo nextest run -p pipeline_correctness_tests --test-threads 1 -- replay_storage
 ```
 
-If tests fail on the PR branch but pass on main, the PR likely breaks an invariant. If tests fail on both, the test suite has drifted — investigate and fix.
-
-### Step 4 — Identify issues
-
-Only raise **high-severity** issues — bugs that would cause incorrect block execution, stale state reads, overlay corruption, broken backpressure, consensus fence bypass, or other correctness regressions. Skip style, naming, and low-impact concerns.
-
-If a potential issue requires more context to evaluate, ask the user rather than guessing.
-
-### Step 5 — Draft comments
-
-Write a draft for each issue in the following format:
-
-```text
-File: <path>
-Line(s): <range>
-Issue: <one-sentence summary>
-Detail: <technical explanation — what breaks, when, what the correct behaviour should be>
-Suggestion: <concrete fix or question to resolve>
-```
-
-Send all drafts to the user at once. Do not post anything to GitHub yet.
-
-### Step 6 — Confirm and publish
-
-Wait for the user to confirm, edit, or discard each draft. Only publish confirmed comments.
-
-### Step 7 — Update knowledge and tests
-
-After the review, if the PR:
-
-- **Adds new behavior in scope**: add a test and update `knowledge/pipeline-correctness.md`.
-- **Changes an existing invariant**: update `knowledge/pipeline-correctness.md` and the affected test.
-- **Exposes a gap in coverage not worth testing now**: append a short deferred note to `knowledge/pipeline-correctness.md`.
-
-After any test changes, run:
-
-```sh
-cargo nextest run -p pipeline_correctness_tests
-```
-
-All tests must pass before the review is considered complete.
-
-Create a branch in this repo for these changes. This branch is to be merged to `main` when the PR being reviewed is merged.
-Open a PR and leave a comment in the target PR with this link and explanation.
-
-## Tone and Style
-
-- Be concise and technical. One sentence per issue where possible.
-- No hedging. If the code is wrong, say so directly.
-- If you are uncertain, say what context you need rather than speculating.
-- Do not comment on what is correct — only what is wrong or suspicious.
+If tests fail on the PR branch but pass on base, the PR likely breaks an invariant. If tests fail on both, the test suite has drifted — investigate and fix.
