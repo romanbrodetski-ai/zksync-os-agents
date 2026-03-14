@@ -10,6 +10,21 @@ This repo contains maintenance agents that review PRs, keep knowledge bases curr
 | `l1-settle` | `l1-settle/` | Settling batches on L1 |
 | `pipeline-correctness` | `pipeline-correctness/` | Block processing pipeline correctness |
 
+## Repository Structure
+
+Each agent lives in its own subdirectory and owns a specific feature area. An agent directory contains:
+
+- `AGENTS.md` — activation criteria, knowledge pointers, and test commands specific to this agent
+- `knowledge/` — curated facts, invariants, and edge cases about the feature area
+- `tests/` — Rust integration tests that encode those invariants as runnable checks
+- `zksync-os-server/` — a git submodule pinned to the server commit the knowledge and tests were generated against
+
+The submodule is the versioning anchor: knowledge and tests are always consistent with a specific server SHA. When the server evolves, the agent bumps the submodule and updates knowledge/tests atomically in one commit. This makes it easy to see exactly what server changes triggered a knowledge refresh (`git log` on the submodule) and to check whether an agent is stale (compare submodule SHA to the base branch HEAD).
+
+All agent workspaces share a single `target/` directory at the repo root (configured via `.cargo/config.toml`) to avoid redundant compilation across agents.
+
+---
+
 ## Running an Agent
 
 Specify the agent when invoking:
