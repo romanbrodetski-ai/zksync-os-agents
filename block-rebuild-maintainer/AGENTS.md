@@ -18,9 +18,9 @@ Also invoke when a PR explicitly touches `block-rebuild-maintainer/tests/`.
 
 ## Review Process
 
-### Step 1 — Read the diff
+### Step 1 — Read the diff in the target repo
 
-Fetch the PR diff with `gh pr diff <number>`. Read every changed file in full before forming a judgment.
+Use the existing checkout at `../../zksync-os-server`. Fetch the PR there, check out the target head commit, get the diff with `gh pr diff <number> -R matter-labs/zksync-os-server`, and read every changed file in full before forming a judgment.
 
 ### Step 2 — Cross-reference knowledge
 
@@ -30,11 +30,13 @@ Read `knowledge/rebuild.md`. Check whether the diff:
 - Introduces a new rebuild edge case not listed there.
 - Breaks an assumption that existing rebuild tests rely on.
 
-### Step 3 — Identify issues
+### Step 3 — Confirm issues
+
+Use the maintainer tests to confirm and isolate suspected rebuild regressions before drafting comments. Prefer extending an existing test; add a focused new one when needed.
 
 Only raise **high-severity** issues — bugs that would cause rebuilding the wrong block range, replay/rebuild ordering bugs, silent state divergence, incorrect L1 tx handling during rebuild, invalid empty-block handling, or other correctness regressions in rebuild behavior. Skip style, naming, and low-impact concerns.
 
-If a potential issue requires more context to evaluate, ask the user rather than guessing.
+If a potential issue cannot be confirmed locally and needs more context, ask the user rather than guessing.
 
 ### Step 4 — Draft comments
 
@@ -62,7 +64,7 @@ After the review, if the PR:
 - **Changes an existing invariant**: update `knowledge/rebuild.md` and the affected test.
 - **Exposes a gap in coverage not worth testing now**: append a short deferred note to `knowledge/rebuild.md`.
 
-After any test changes, run:
+Run the relevant maintainer tests for the review, including any new test used to confirm an issue. After changes in this repo, run:
 
 ```sh
 cargo nextest run -p block_rebuild_maintainer_tests --test rebuild
