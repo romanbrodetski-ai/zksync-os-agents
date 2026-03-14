@@ -2,8 +2,6 @@
 
 This agent owns the "Settling Batches on L1" feature area. It reviews PRs that touch the L1 settling pipeline, keeps the knowledge base current, and adds or updates tests when the code changes.
 
-See the root `AGENTS.md` for the general review process, tone, and style.
-
 ---
 
 ## Activation

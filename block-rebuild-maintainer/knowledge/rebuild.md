@@ -24,6 +24,8 @@ Important invariants:
 - Empty rebuilds execute no txs.
 - Non-empty rebuilds may drop all L1 txs if the first replayed L1 priority id does not match the provider's current `next_l1_priority_id`.
 - If the first replayed L1 tx matches, rebuild keeps the full replay tx list.
+- Non-empty rebuilds with no L1 txs at all (`first_l1_tx == None`) set `filter_l1_txs = false`, so all transactions (upgrade, interop, etc.) are kept intact.
+- `force_preimages` is taken from the replay record unchanged in both empty and non-empty rebuilds.
 
 Operational note:
 - Rebuild is intentionally more permissive than replay:
@@ -31,6 +33,10 @@ Operational note:
   - `InvalidTxPolicy::RejectAndContinue`
   - `expected_block_output_hash = None`
 
+No-rebuild path:
+- When `rebuild_options` is `None`, all WAL records from `starting_block` through `latest_record` are emitted as `Replay` commands; the rebuild stream is empty; `Produce` follows immediately after.
+
 Testing strategy:
 - Cover command sequencing and rebuild preparation separately.
 - For each test, validate it with a temporary code mutation that removes the guarded behavior, then restore the production code.
+- All 13 tests have been fail-first validated (mutation applied → test failed → mutation reverted → test passes).

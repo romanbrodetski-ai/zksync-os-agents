@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use zksync_os_interface::traits::{PreimageSource, ReadStorage};
-use zksync_os_interface::types::BlockContext;
+use zksync_os_interface::types::{BlockContext, BlockHashes};
 use zksync_os_mempool::subpools::{
     interop_fee::InteropFeeSubpool, interop_roots::InteropRootsSubpool, l1::L1Subpool,
     l2, upgrade::UpgradeSubpool,
@@ -573,5 +573,210 @@ async fn rebuild_prepare_rejects_empty_upgrade_block() {
         error
             .to_string()
             .contains("Cannot make an empty block when there is an upgrade transaction")
+    );
+}
+
+// Helper: like make_provider but with a non-default block_hashes value.
+fn make_provider_with_block_hashes(
+    next_l1_priority_id: u64,
+    block_hashes: BlockHashes,
+) -> BlockContextProvider<impl zksync_os_mempool::subpools::l2::L2Subpool> {
+    let zk_provider_factory = ZkProviderFactory::new(DummyStateHistory, DummyRepository, 270);
+    let l2_subpool = l2::in_memory(
+        zk_provider_factory,
+        PoolConfig::default(),
+        TxValidatorConfig {
+            max_input_bytes: usize::MAX,
+        },
+    );
+    let pool = Pool::new(
+        UpgradeSubpool::new(sample_protocol_version()),
+        Default::default(),
+        InteropFeeSubpool::new(91),
+        InteropRootsSubpool::new(100),
+        L1Subpool::new(16),
+        l2_subpool,
+    );
+    let (sender, _receiver) = watch::channel(None);
+    BlockContextProvider::new(
+        next_l1_priority_id,
+        InteropRootsLogIndex {
+            block_number: 88,
+            index_in_block: 5,
+        },
+        77,
+        91,
+        pool,
+        block_hashes,
+        555,
+        270,
+        10_000_000,
+        20_000_000,
+        100,
+        Duration::from_secs(1),
+        sample_protocol_version(),
+        Address::with_last_byte(0xfe),
+        sender,
+        make_fee_provider(),
+    )
+}
+
+// ── New tests ──────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn command_source_no_rebuild_replays_all_then_produces() {
+    // Fail-first validation: changed the `else` branch of `rebuild_options` to emit a rebuild
+    // stream instead of an empty one, so the WAL records were turned into Rebuild commands rather
+    // than Replay commands, causing the first two assertions to fail.
+    let storage = FakeReplayStorage::new([
+        replay_record(10, 0, vec![]),
+        replay_record(11, 0, vec![]),
+        replay_record(12, 0, vec![]),
+    ]);
+    let source = MainNodeCommandSource {
+        block_replay_storage: storage,
+        starting_block: 10,
+        rebuild_options: None,
+        block_time: Duration::from_secs(1),
+        max_transactions_in_block: 100,
+    };
+
+    // 3 replay commands + 1 produce command.
+    let commands = collect_commands(source, 4).await;
+
+    assert!(matches!(&commands[0], BlockCommand::Replay(r) if r.block_context.block_number == 10));
+    assert!(matches!(&commands[1], BlockCommand::Replay(r) if r.block_context.block_number == 11));
+    assert!(matches!(&commands[2], BlockCommand::Replay(r) if r.block_context.block_number == 12));
+    assert!(matches!(&commands[3], BlockCommand::Produce(p) if p.block_number == 13));
+}
+
+#[tokio::test]
+async fn rebuild_prepare_non_empty_with_no_l1_txs_keeps_all_transactions() {
+    // Fail-first validation: set `filter_l1_txs = true` in the `else` branch (None case) AND
+    // widened the filter to also drop upgrade txs, which emptied the prepared command and made
+    // this test fail with "left: 0, right: 1".
+    let mut provider = make_provider(5);
+    let rebuild_record = replay_record(
+        7,
+        0,
+        // Only an upgrade tx, no L1 priority txs.
+        vec![upgrade_tx(sample_protocol_version())],
+    );
+
+    let prepared = provider
+        .prepare_command(BlockCommand::Rebuild(Box::new(
+            zksync_os_sequencer::model::blocks::RebuildCommand {
+                replay_record: rebuild_record,
+                make_empty: false,
+            },
+        )))
+        .await
+        .unwrap();
+
+    let txs = drain_txs(prepared).await;
+    // The upgrade tx must survive; filter_l1_txs == false because first_l1_tx is None.
+    assert_eq!(txs.len(), 1);
+    assert!(matches!(txs[0].envelope(), ZkEnvelope::Upgrade(_)));
+}
+
+#[tokio::test]
+async fn rebuild_prepare_preserves_force_preimages() {
+    // Fail-first validation: replaced `force_preimages: rebuild.replay_record.force_preimages`
+    // with `force_preimages: vec![]`, which caused the assertion below to fail.
+    let mut provider = make_provider(0);
+    let rebuild_record = replay_record(
+        8,
+        0,
+        vec![],
+    );
+    let expected_preimages = rebuild_record.force_preimages.clone();
+
+    let prepared = provider
+        .prepare_command(BlockCommand::Rebuild(Box::new(
+            zksync_os_sequencer::model::blocks::RebuildCommand {
+                replay_record: rebuild_record,
+                make_empty: false,
+            },
+        )))
+        .await
+        .unwrap();
+
+    assert_eq!(prepared.force_preimages, expected_preimages);
+    // The helper sets one (B256::with_last_byte(0xaa), vec![1,2,3]) entry; confirm it is non-empty
+    // so this test actually exercises the non-trivial case.
+    assert!(!prepared.force_preimages.is_empty());
+}
+
+#[tokio::test]
+async fn rebuild_prepare_preserves_execution_version_and_protocol_version() {
+    // Fail-first validation: hardcoded execution_version to 0 in the rebuild branch, which
+    // caused the execution_version assertion to fail (left: 0, right: 3).
+    // Note: the protocol_version invariant is confirmed structurally by asserting the field
+    // equals the replay record value; a source-swap mutation is a no-op because the provider
+    // and replay record share the same sample_protocol_version() in this test.
+    let mut provider = make_provider(0);
+    // sample_block_context uses execution_version=3; sample_protocol_version() is (0,30,2).
+    let rebuild_record = replay_record(9, 0, vec![]);
+    let expected_exec_version = rebuild_record.block_context.execution_version;
+    let expected_proto_version = rebuild_record.protocol_version.clone();
+
+    let prepared = provider
+        .prepare_command(BlockCommand::Rebuild(Box::new(
+            zksync_os_sequencer::model::blocks::RebuildCommand {
+                replay_record: rebuild_record,
+                make_empty: false,
+            },
+        )))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        prepared.block_context.execution_version,
+        expected_exec_version,
+        "execution_version must be preserved from replay record"
+    );
+    assert_eq!(
+        prepared.protocol_version,
+        expected_proto_version,
+        "protocol_version must be preserved from replay record"
+    );
+}
+
+#[tokio::test]
+async fn rebuild_prepare_uses_provider_block_hashes_not_replay_record() {
+    // Fail-first validation: changed the rebuild branch to use
+    // `rebuild.replay_record.block_context.block_hashes` instead of
+    // `self.block_hashes_for_next_block`, which caused the assertion to fail because
+    // the replay record carries Default::default() while the provider carries a distinct value.
+    let mut distinct_hashes = [U256::ZERO; 256];
+    distinct_hashes[0] = U256::from(0xdeadbeef_u64);
+    let provider_block_hashes = BlockHashes(distinct_hashes);
+
+    // Confirm the replay record has the default (all-zero) block hashes.
+    let rebuild_record = replay_record(10, 0, vec![]);
+    assert_eq!(rebuild_record.block_context.block_hashes, BlockHashes::default(),
+        "replay_record must have default block_hashes for this test to be meaningful");
+
+    let mut provider = make_provider_with_block_hashes(0, provider_block_hashes);
+
+    let prepared = provider
+        .prepare_command(BlockCommand::Rebuild(Box::new(
+            zksync_os_sequencer::model::blocks::RebuildCommand {
+                replay_record: rebuild_record,
+                make_empty: false,
+            },
+        )))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        prepared.block_context.block_hashes,
+        provider_block_hashes,
+        "block_hashes must come from provider, not replay record"
+    );
+    assert_ne!(
+        prepared.block_context.block_hashes,
+        BlockHashes::default(),
+        "sanity: the two values must be distinct"
     );
 }
