@@ -41,13 +41,13 @@ Each agent's `AGENTS.md` lists which PRs should activate it (in-scope files and 
 
 Each agent directory contains a `zksync-os-server` submodule pinned to the commit its knowledge base and tests were generated against.
 
-1. Ensure `../zksync-os-server` (the shared working checkout) is clean — escalate to the user if it has uncommitted changes.
-2. Check out the PR's **base branch** in `../zksync-os-server`.
-3. From the agent's directory, run `git submodule status` and compare the submodule SHA to `../zksync-os-server`'s HEAD. If they differ, update the knowledge base and tests against the new version, then commit `knowledge/` + the bumped submodule pointer atomically.
+1. Ensure the agent's own `zksync-os-server/` submodule is clean — escalate to the user if it has uncommitted changes.
+2. Check out the PR's **base branch** in that agent-local submodule.
+3. From the agent's directory, compare the submodule SHA to the base branch HEAD inside `zksync-os-server/`. If they differ, update the knowledge base and tests against the new version, then commit `knowledge/` + the bumped submodule pointer atomically.
 
 ### Step 1 — Read the diff in the target repo
 
-Check out the **PR head commit** in `../zksync-os-server` (it was on the base branch after Step 0). Get the diff with `gh pr diff <number> -R matter-labs/zksync-os-server` and read every changed file in full before forming a judgment.
+Check out the **PR head commit** in the agent-local `zksync-os-server/` submodule (it was on the base branch after Step 0). Get the diff with `gh pr diff <number> -R matter-labs/zksync-os-server` and read every changed file in full before forming a judgment.
 
 ### Step 2 — Cross-reference knowledge
 
