@@ -1,0 +1,26 @@
+[package]
+name = "zksync_os_l1_settle_tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+zksync_os_l1_sender.workspace = true
+zksync_os_contract_interface.workspace = true
+zksync_os_batch_types.workspace = true
+zksync_os_integration_tests = { path = "../../../zksync-os-server/integration-tests" }
+zksync_os_server.workspace = true
+zksync_os_state_full_diffs.workspace = true
+zksync_os_types.workspace = true
+
+alloy = { workspace = true, default-features = false, features = ["provider-anvil-node", "rand", "json-rpc", "pubsub", "provider-ws"] }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+test-log = { workspace = true, default-features = false, features = ["trace", "color"] }
