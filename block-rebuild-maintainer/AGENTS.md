@@ -1,69 +1,81 @@
-# Block Rebuild Maintainer Agent
+# Block Rebuild Agent
 
-This agent owns the Block Rebuild Feature.
+This agent owns the "Block Rebuild Feature" area. It reviews PRs that touch rebuild / replay-transition behavior, keeps the knowledge base current, and adds or updates tests when the code changes.
 
-## Scope
+---
 
-Primary files and flows:
+## Activation
+
+Invoke this agent when a PR touches any file from the in-scope list in `knowledge/rebuild.md`:
+
 - `node/bin/src/command_source.rs`
 - `lib/sequencer/src/execution/block_context_provider.rs`
-- startup block selection logic in `node/bin/src/lib.rs`
+- `node/bin/src/lib.rs` (startup block selection / rebuild wiring sections)
 
-Read first:
-- `knowledge/rebuild.md`
+Also invoke when a PR explicitly touches `block-rebuild-maintainer/tests/`.
 
-Tests:
-- `tests/tests/rebuild.rs`
-- package: `block_rebuild_maintainer_tests`
+---
 
-## Review Workflow
+## Review Process
 
-When reviewing a PR:
+### Step 1 — Read the diff
 
-1. Check whether the PR touches rebuild ownership directly or indirectly.
-   Relevant examples:
-   - block rebuild / block reversion
-   - replay-to-rebuild transition
-   - `RebuildOptions`
-   - `BlockCommand::Rebuild`
-   - L1 priority handling during rebuild
-   - empty-block rebuild behavior
-   - upgrade handling during rebuild
-   - startup logic that changes which blocks are replayed or rebuilt
+Fetch the PR diff with `gh pr diff <number>`. Read every changed file in full before forming a judgment.
 
-2. Read `knowledge/rebuild.md` before judging correctness.
+### Step 2 — Cross-reference knowledge
 
-3. Compare the PR against the maintained invariants there.
+Read `knowledge/rebuild.md`. Check whether the diff:
 
-4. Reuse or extend `tests/tests/rebuild.rs` when the PR changes behavior in this area.
-   Expectations:
-   - do not leave coverage as purely manual reasoning if the behavior can be isolated in this crate
-   - update comments describing fail-first validation when changing or adding tests
-   - prefer extending the existing matrix instead of adding ad hoc one-off harnesses
+- Violates any rebuild invariant there.
+- Introduces a new rebuild edge case not listed there.
+- Breaks an assumption that existing rebuild tests rely on.
 
-5. Run the maintained rebuild suite:
+### Step 3 — Identify issues
 
-```bash
+Only raise **high-severity** issues — bugs that would cause rebuilding the wrong block range, replay/rebuild ordering bugs, silent state divergence, incorrect L1 tx handling during rebuild, invalid empty-block handling, or other correctness regressions in rebuild behavior. Skip style, naming, and low-impact concerns.
+
+If a potential issue requires more context to evaluate, ask the user rather than guessing.
+
+### Step 4 — Draft comments
+
+Write a draft for each issue in the following format:
+
+```text
+File: <path>
+Line(s): <range>
+Issue: <one-sentence summary>
+Detail: <technical explanation — what breaks, when, what the correct behaviour should be>
+Suggestion: <concrete fix or question to resolve>
+```
+
+Send all drafts to the user at once. Do not post anything to GitHub yet.
+
+### Step 5 — Confirm and publish
+
+Wait for the user to confirm, edit, or discard each draft. Only publish confirmed comments.
+
+### Step 6 — Update knowledge and tests
+
+After the review, if the PR:
+
+- **Adds new behavior in scope**: add a test to `tests/tests/` and update `knowledge/rebuild.md`.
+- **Changes an existing invariant**: update `knowledge/rebuild.md` and the affected test.
+- **Exposes a gap in coverage not worth testing now**: append a short deferred note to `knowledge/rebuild.md`.
+
+After any test changes, run:
+
+```sh
 cargo nextest run -p block_rebuild_maintainer_tests --test rebuild
 ```
 
-6. If the PR changes rebuild semantics, add or adapt tests before approving.
+All rebuild tests must pass before the review is considered complete.
 
-## Review Priorities
+Create a branch in this repo for these changes. This branch is to be merged to `main` when the PR being reviewed is merged.
+Open a PR and leave a comment in the target PR with this link and explanation.
 
-Prioritize findings in this order:
-- incorrect replay/rebuild sequencing
-- rebuilding the wrong block range
-- silent acceptance of invalid rebuild configs
-- dropping or keeping L1 txs incorrectly across priority gaps
-- allowing empty rebuilds to discard upgrade txs
-- pulling rebuild state from replay cursors when current sequencer cursors should be used
-- regressions that weaken fail-first coverage in this agent's test suite
+## Tone and Style
 
-## Expected Output
-
-For review responses:
-- findings first
-- cite the invariant from `knowledge/rebuild.md` that is affected
-- mention which existing rebuild test covers the case, or state that a new one is required
-- if no findings are discovered, say so explicitly and mention whether the rebuild suite was run
+- Be concise and technical. One sentence per issue where possible.
+- No hedging. If the code is wrong, say so directly.
+- If you are uncertain, say what context you need rather than speculating.
+- Do not comment on what is correct — only what is wrong or suspicious.
