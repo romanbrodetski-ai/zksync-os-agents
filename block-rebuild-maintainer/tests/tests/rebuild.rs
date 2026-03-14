@@ -1,4 +1,4 @@
-#[path = "../../../../zksync-os-server/node/bin/src/command_source.rs"]
+#[path = "../../zksync-os-server/node/bin/src/command_source.rs"]
 mod command_source;
 
 use alloy::consensus::Sealed;
@@ -302,7 +302,7 @@ fn make_fee_provider() -> FeeProvider {
         pubdata_price_rx,
         blob_fill_ratio_rx,
         token_price_rx,
-        PubdataMode::Calldata,
+        Some(PubdataMode::Calldata),
     )
 }
 
@@ -336,9 +336,6 @@ fn make_provider(next_l1_priority_id: u64) -> BlockContextProvider<impl zksync_o
         Default::default(),
         555,
         270,
-        Duration::from_secs(2),
-        7,
-        270,
         10_000_000,
         20_000_000,
         100,
@@ -363,7 +360,6 @@ async fn command_source_replays_then_rebuilds_then_produces() {
         replay_record(2, 5, vec![l1_tx(5)]),
         replay_record(3, 0, vec![upgrade_tx(sample_protocol_version())]),
     ]);
-    let (_replay_tx, replay_rx) = mpsc::channel(1);
     let source = MainNodeCommandSource {
         block_replay_storage: storage,
         starting_block: 1,
@@ -371,7 +367,8 @@ async fn command_source_replays_then_rebuilds_then_produces() {
             rebuild_from_block: 2,
             blocks_to_empty: HashSet::from([3]),
         }),
-        replays_to_execute: replay_rx,
+        block_time: Duration::from_secs(1),
+        max_transactions_in_block: 100,
     };
 
     let commands = collect_commands(source, 4).await;
@@ -390,7 +387,6 @@ async fn command_source_rebuild_from_starting_block_skips_replay_phase() {
         replay_record(2, 0, vec![]),
         replay_record(3, 0, vec![]),
     ]);
-    let (_replay_tx, replay_rx) = mpsc::channel(1);
     let source = MainNodeCommandSource {
         block_replay_storage: storage,
         starting_block: 2,
@@ -398,7 +394,8 @@ async fn command_source_rebuild_from_starting_block_skips_replay_phase() {
             rebuild_from_block: 2,
             blocks_to_empty: HashSet::new(),
         }),
-        replays_to_execute: replay_rx,
+        block_time: Duration::from_secs(1),
+        max_transactions_in_block: 100,
     };
 
     let commands = collect_commands(source, 3).await;
@@ -409,12 +406,11 @@ async fn command_source_rebuild_from_starting_block_skips_replay_phase() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "rebuild_from_block must be >= starting_block")]
+#[should_panic(expected = "rebuild_from_block must be >= block_to_start")]
 async fn command_source_rejects_rebuild_before_starting_block() {
     // Fail-first validation: removed the lower-bound assert in `command_source`, which let the
     // source start and made this panic expectation fail.
     let storage = FakeReplayStorage::new([replay_record(3, 0, vec![])]);
-    let (_replay_tx, replay_rx) = mpsc::channel(1);
     let source = MainNodeCommandSource {
         block_replay_storage: storage,
         starting_block: 3,
@@ -422,7 +418,8 @@ async fn command_source_rejects_rebuild_before_starting_block() {
             rebuild_from_block: 2,
             blocks_to_empty: HashSet::new(),
         }),
-        replays_to_execute: replay_rx,
+        block_time: Duration::from_secs(1),
+        max_transactions_in_block: 100,
     };
 
     run_command_source_to_completion(source).await;
@@ -434,7 +431,6 @@ async fn command_source_rejects_rebuild_after_latest_record() {
     // Fail-first validation: changed the upper-bound assert to a strict `< last_block_in_wal`
     // check, which produced a different panic and made this expectation fail.
     let storage = FakeReplayStorage::new([replay_record(3, 0, vec![])]);
-    let (_replay_tx, replay_rx) = mpsc::channel(1);
     let source = MainNodeCommandSource {
         block_replay_storage: storage,
         starting_block: 3,
@@ -442,7 +438,8 @@ async fn command_source_rejects_rebuild_after_latest_record() {
             rebuild_from_block: 4,
             blocks_to_empty: HashSet::new(),
         }),
-        replays_to_execute: replay_rx,
+        block_time: Duration::from_secs(1),
+        max_transactions_in_block: 100,
     };
 
     run_command_source_to_completion(source).await;

@@ -7,11 +7,12 @@ Scope:
 
 Core flow:
 - Startup chooses the earliest block that must be replayed to restore correctness.
-- `MainNodeCommandSource` emits `Replay` commands up to `rebuild_from_block - 1`, then `Rebuild` commands for `[rebuild_from_block..=latest_record]`, then resumes `Produce`.
+- `MainNodeCommandSource` calls the `command_source()` free function which returns a `BoxStream`. It emits `Replay` commands up to `rebuild_from_block - 1`, then `Rebuild` commands for `[rebuild_from_block..=latest_record]`, then an infinite stream of `Produce` commands.
+- `ProduceCommand` now carries `block_number`, `block_time`, and `max_transactions_in_block` (moved from `BlockContextProvider`).
 - `BlockContextProvider` converts `Rebuild` into execution-ready commands.
 
 Important invariants:
-- `rebuild_from_block` must be within `[starting_block, latest_record]`.
+- `rebuild_from_block` must be within `[block_to_start, latest_record]` (asserted as `rebuild_from_block >= block_to_start` and `rebuild_from_block <= last_block_in_wal`).
 - Rebuild keeps the original block number, timestamp, fee params, execution version, protocol version and force preimages from the replay record.
 - Rebuild does not reuse the old block hash chain. It uses the provider's current `block_hashes_for_next_block`.
 - Rebuild starts from the provider's current cursors:
