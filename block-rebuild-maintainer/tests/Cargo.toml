@@ -1,0 +1,31 @@
+[package]
+name = "block_rebuild_maintainer_tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+alloy = { workspace = true, default-features = false, features = ["consensus", "eips", "k256", "rpc-types"] }
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+futures.workspace = true
+num.workspace = true
+semver.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing.workspace = true
+zksync_os_interface.workspace = true
+zksync_os_mempool.workspace = true
+zksync_os_pipeline.workspace = true
+zksync_os_reth_compat.workspace = true
+zksync_os_rpc_api = { workspace = true, features = ["server"] }
+zksync_os_sequencer.workspace = true
+zksync_os_storage_api.workspace = true
+zksync_os_types.workspace = true
+
+[dev-dependencies]
+test-log = { workspace = true, default-features = false, features = ["trace", "color"] }
