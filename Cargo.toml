@@ -1,5 +1,5 @@
 [workspace]
-members = ["block-rebuild-maintainer/tests", "l1-settle/tests"]
+members = ["block-rebuild-maintainer/tests", "l1-settle/tests", "pipeline-correctness/tests"]
 resolver = "3"
 
 [workspace.package]
