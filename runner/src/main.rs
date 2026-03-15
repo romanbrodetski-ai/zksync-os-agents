@@ -4,16 +4,14 @@ mod prompts;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "runner", about = "ZKsync OS agent runner")]
 struct Cli {
-    /// Agent to run
     #[arg(long, short)]
     agent: Agent,
 
-    /// AI backend
     #[arg(long, default_value = "claude")]
     ai: Ai,
 
@@ -48,7 +46,7 @@ enum Ai {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Review a PR: sync to base, cross-reference knowledge, confirm with tests, output findings.
+    /// Review a PR. The PR's base branch must already be the agent's current submodule SHA.
     ReviewPr {
         /// GitHub PR number (in matter-labs/zksync-os-server)
         pr_number: u64,
@@ -62,91 +60,57 @@ fn main() -> Result<()> {
 
     match cli.ai {
         Ai::Codex => todo!("Codex support not yet implemented"),
-        Ai::Claude => run_claude(cli.agent, cli.command),
+        Ai::Claude => {}
     }
-}
 
-fn run_claude(agent: Agent, command: Command) -> Result<()> {
     let repo_root = find_repo_root()?;
-    let agent_path = repo_root.join(agent.dir());
+    let agent_path = repo_root.join(cli.agent.dir());
     let submodule_path = agent_path.join("zksync-os-server");
 
     git::check_submodule_clean(&submodule_path)
         .context("submodule must be clean before running an agent")?;
 
-    match command {
-        Command::ReviewPr { pr_number } => review_pr(agent_path, submodule_path, pr_number),
-        Command::UpdateMain => update_main(agent, repo_root, agent_path, submodule_path),
+    let current = git::current_sha(&submodule_path)?;
+
+    match cli.command {
+        Command::ReviewPr { pr_number } => {
+            let (base, head) = git::pr_shas(pr_number)?;
+            if current != base {
+                anyhow::bail!(
+                    "submodule is at {current} but PR #{pr_number} base is {base} — \
+                     run update-main first"
+                );
+            }
+            claude::exec(
+                &agent_path,
+                &format!("PR#{pr_number}"),
+                prompts::SYSTEM_CTX,
+                &prompts::agent_prompt(&base, &head),
+            );
+        }
+        Command::UpdateMain => {
+            let new = git::server_main_sha(&submodule_path)?;
+            if current == new {
+                println!("Already at latest main ({new}). Nothing to do.");
+                return Ok(());
+            }
+            claude::exec(
+                &agent_path,
+                "update-main",
+                prompts::SYSTEM_CTX,
+                &prompts::agent_prompt(&current, &new),
+            );
+        }
     }
-}
-
-fn review_pr(agent_path: PathBuf, submodule_path: PathBuf, pr_number: u64) -> Result<()> {
-    let (base_sha, head_sha) = git::pr_shas(pr_number)?;
-    let current_sha = git::submodule_sha(&submodule_path)?;
-
-    // If submodule is behind the PR base, sync knowledge/tests to base first.
-    if current_sha != base_sha {
-        println!("Syncing to PR base: {current_sha} → {base_sha}");
-        claude::run_claude(
-            &agent_path,
-            &format!("PR#{pr_number} sync-base"),
-            prompts::SYSTEM_CTX,
-            &prompts::agent_prompt(&current_sha, &base_sha),
-        )?;
-    } else {
-        println!("Submodule already at PR base {base_sha}. Skipping sync.");
-    }
-
-    // Now examine the PR diff: base → head.
-    println!("Reviewing PR#{pr_number}: {base_sha} → {head_sha}");
-    claude::exec_claude(
-        &agent_path,
-        &format!("PR#{pr_number} review"),
-        prompts::SYSTEM_CTX,
-        &prompts::agent_prompt(&base_sha, &head_sha),
-    );
-}
-
-fn update_main(
-    agent: Agent,
-    repo_root: PathBuf,
-    agent_path: PathBuf,
-    _submodule_path: PathBuf,
-) -> Result<()> {
-    let (old_sha, new_sha) = git::update_submodule_to_main(&repo_root, agent.dir())?;
-
-    if old_sha == new_sha {
-        println!("Submodule already at latest main ({new_sha}). Nothing to do.");
-        return Ok(());
-    }
-
-    // Restore submodule to old SHA — agent checks out new SHA itself as part of its work.
-    let submodule_path = repo_root.join(agent.dir()).join("zksync-os-server");
-    git::checkout_submodule_sha(&submodule_path, &old_sha)?;
-
-    println!("Updating: {old_sha} → {new_sha}");
-    claude::exec_claude(
-        &agent_path,
-        "update-main",
-        prompts::SYSTEM_CTX,
-        &prompts::agent_prompt(&old_sha, &new_sha),
-    );
 }
 
 /// Walks up from CWD until it finds a directory containing `.git`.
 fn find_repo_root() -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    let mut dir: &Path = &cwd;
-    loop {
+    for dir in cwd.ancestors() {
         if dir.join(".git").exists() {
             return Ok(dir.to_path_buf());
         }
-        match dir.parent() {
-            Some(parent) => dir = parent,
-            None => anyhow::bail!(
-                "could not find a git repo root (no .git found above {})",
-                cwd.display()
-            ),
-        }
     }
+    anyhow::bail!("could not find a git repo root (no .git found above {})", cwd.display())
 }
