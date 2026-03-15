@@ -65,8 +65,8 @@ pub fn update_submodule_to_main(repo_root: &Path, agent_dir: &str) -> Result<(St
     Ok((old_sha, new_sha))
 }
 
-/// Returns the base branch commit SHA for a PR in matter-labs/zksync-os-server.
-pub fn pr_base_sha(pr_number: u64) -> Result<String> {
+/// Returns (base_sha, head_sha) for a PR in matter-labs/zksync-os-server.
+pub fn pr_shas(pr_number: u64) -> Result<(String, String)> {
     let out = std::process::Command::new("gh")
         .args([
             "pr",
@@ -75,9 +75,9 @@ pub fn pr_base_sha(pr_number: u64) -> Result<String> {
             "--repo",
             "matter-labs/zksync-os-server",
             "--json",
-            "baseRefOid",
+            "baseRefOid,headRefOid",
             "--jq",
-            ".baseRefOid",
+            "[.baseRefOid, .headRefOid] | @tsv",
         ])
         .output()
         .context("failed to run gh pr view")?;
@@ -89,7 +89,11 @@ pub fn pr_base_sha(pr_number: u64) -> Result<String> {
         );
     }
 
-    Ok(String::from_utf8(out.stdout)?.trim().to_string())
+    let line = String::from_utf8(out.stdout)?;
+    let mut parts = line.trim().splitn(2, '\t');
+    let base = parts.next().context("missing baseRefOid")?.to_string();
+    let head = parts.next().context("missing headRefOid")?.to_string();
+    Ok((base, head))
 }
 
 /// Fetches from origin and checks out a specific SHA in the submodule (detached HEAD).

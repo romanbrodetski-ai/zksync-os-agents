@@ -1,7 +1,8 @@
 mod claude;
 mod git;
+mod prompts;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 
@@ -37,15 +38,6 @@ impl Agent {
             Agent::SepoliaDeploy => "sepolia-deploy",
         }
     }
-
-    fn display_name(&self) -> &'static str {
-        match self {
-            Agent::BlockRebuildMaintainer => "block-rebuild-maintainer",
-            Agent::L1Settle => "l1-settle",
-            Agent::PipelineCorrectness => "pipeline-correctness",
-            Agent::SepoliaDeploy => "sepolia-deploy",
-        }
-    }
 }
 
 #[derive(ValueEnum, Clone, Debug)]
@@ -56,14 +48,12 @@ enum Ai {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Review a PR: cross-reference the diff against the knowledge base,
-    /// confirm issues with tests, draft GitHub comments for user approval.
+    /// Review a PR: sync to base, cross-reference knowledge, confirm with tests, output findings.
     ReviewPr {
         /// GitHub PR number (in matter-labs/zksync-os-server)
         pr_number: u64,
     },
-    /// Advance the agent's server submodule to the latest main, then update
-    /// knowledge and tests so they compile, pass, and reflect the new version.
+    /// Advance the agent's server submodule to latest main, sync knowledge and tests.
     UpdateMain,
 }
 
@@ -85,87 +75,44 @@ fn run_claude(agent: Agent, command: Command) -> Result<()> {
         .context("submodule must be clean before running an agent")?;
 
     match command {
-        Command::ReviewPr { pr_number } => review_pr(agent, agent_path, submodule_path, pr_number),
+        Command::ReviewPr { pr_number } => review_pr(agent_path, submodule_path, pr_number),
         Command::UpdateMain => update_main(agent, repo_root, agent_path, submodule_path),
     }
 }
 
-fn review_pr(
-    agent: Agent,
-    agent_path: PathBuf,
-    submodule_path: PathBuf,
-    pr_number: u64,
-) -> Result<()> {
-    // --- Step 0: sync submodule to PR base branch ---
-    let pr_base_sha = git::pr_base_sha(pr_number)?;
+fn review_pr(agent_path: PathBuf, submodule_path: PathBuf, pr_number: u64) -> Result<()> {
+    let (base_sha, head_sha) = git::pr_shas(pr_number)?;
     let current_sha = git::submodule_sha(&submodule_path)?;
 
-    if current_sha != pr_base_sha {
-        println!(
-            "Submodule is at {current_sha}, PR base is {pr_base_sha}. Syncing…"
-        );
-        git::checkout_submodule_sha(&submodule_path, &pr_base_sha)?;
-
-        // Run the agent to update knowledge/tests to match the new base,
-        // same as update-main but targeting the PR base SHA.
-        let sync_session = format!("{} PR#{pr_number} sync-base", agent.display_name());
-        let agent_name = agent.display_name();
-        let sync_ctx = format!(
-            "Mode: sync-to-pr-base. \
-             Agent: {agent_name}. \
-             Server submodule updated from {current_sha} to {pr_base_sha} (PR #{pr_number} base).",
-        );
-        let sync_prompt = format!(
-            "The {agent}'s server submodule has been updated from {current_sha} to {pr_base_sha} \
-             to match the base branch of PR #{pr_number}.\n\
-             \n\
-             Update knowledge files and tests so they compile and pass against this version. \
-             Run the agent's test suite (command in AGENTS.md) to confirm. \
-             Commit knowledge/ and the bumped submodule pointer atomically before finishing.\n\
-             \n\
-             Do not review the PR itself yet — that happens in the next session.",
-            agent = agent.display_name(),
-        );
-
-        claude::run_claude(&agent_path, &sync_session, &sync_ctx, &sync_prompt)?;
+    // Sync to PR base if needed (agent updates knowledge/tests, then commits).
+    if current_sha != base_sha {
+        println!("Syncing to PR base: {current_sha} → {base_sha}");
+        claude::run_claude(
+            &agent_path,
+            &format!("PR#{pr_number} sync-base"),
+            &prompts::system_ctx(),
+            &prompts::sync_prompt(&current_sha, &base_sha),
+        )?;
     } else {
-        println!("Submodule already at PR base {pr_base_sha}. Skipping sync.");
+        println!("Submodule already at PR base {base_sha}. Skipping sync.");
     }
 
-    // --- Step 1+: run the actual PR review ---
-    let session_name = format!("{} PR#{pr_number} review", agent.display_name());
-    let agent_name = agent.display_name();
-    let system_ctx = format!(
-        "Mode: pr-review. \
-         Agent: {agent_name}. \
-         PR: #{pr_number} in matter-labs/zksync-os-server. \
-         Server submodule SHA (base): {pr_base_sha}.",
+    // Review the PR diff (base → head). Submodule stays at base_sha.
+    claude::exec_claude(
+        &agent_path,
+        &format!("PR#{pr_number} review"),
+        &prompts::system_ctx(),
+        &prompts::review_prompt(&base_sha, &head_sha),
     );
-    let prompt = format!(
-        "Run the {agent} agent on PR #{pr_number}.\n\
-         \n\
-         The submodule is already at the PR base ({pr_base_sha}). Start from Step 1:\n\
-         - Step 1: fetch the diff with `gh pr diff {pr_number} -R matter-labs/zksync-os-server`.\n\
-         - Steps 2–3: cross-reference knowledge, confirm issues with tests.\n\
-         - Step 4: present all draft comments here before posting anything to GitHub.\n\
-         - Steps 5–6: post confirmed comments, update knowledge and tests.",
-        agent = agent.display_name(),
-    );
-
-    claude::exec_claude(&agent_path, &session_name, &system_ctx, &prompt);
 }
 
 fn update_main(
     agent: Agent,
     repo_root: PathBuf,
     agent_path: PathBuf,
-    _submodule_path: PathBuf,
+    submodule_path: PathBuf,
 ) -> Result<()> {
-    println!(
-        "Updating {}'s server submodule to latest main…",
-        agent.display_name()
-    );
-
+    let current_sha = git::submodule_sha(&submodule_path)?;
     let (old_sha, new_sha) = git::update_submodule_to_main(&repo_root, agent.dir())?;
 
     if old_sha == new_sha {
@@ -173,34 +120,17 @@ fn update_main(
         return Ok(());
     }
 
-    println!("Submodule updated: {old_sha} → {new_sha}");
+    // Restore submodule to old SHA — agent will do the checkout itself after
+    // reading the diff, keeping the transition fully under its control.
+    git::checkout_submodule_sha(&submodule_path, &current_sha)?;
 
-    let session_name = format!("{} update-main", agent.display_name());
-
-    let system_ctx = format!(
-        "Mode: update-main. \
-         Agent: {agent}. \
-         Server submodule updated from {old_sha} to {new_sha}.",
-        agent = agent.display_name(),
+    println!("Updating: {old_sha} → {new_sha}");
+    claude::exec_claude(
+        &agent_path,
+        "update-main",
+        &prompts::system_ctx(),
+        &prompts::sync_prompt(&old_sha, &new_sha),
     );
-
-    let prompt = format!(
-        "The {agent} agent's server submodule has been updated from {old_sha} to {new_sha}.\n\
-         \n\
-         Your job:\n\
-         1. Read what changed: `git -C zksync-os-server log --oneline {old_sha}..{new_sha}`\n\
-            and review the relevant diffs.\n\
-         2. Update knowledge files so they reflect the new server version.\n\
-         3. Update tests so they compile and pass against the new server code.\n\
-         4. Run the agent's test suite (command in AGENTS.md) to confirm.\n\
-         5. Commit knowledge/ and the bumped submodule pointer atomically.\n\
-         \n\
-         Do not post GitHub PR comments. If you find a breaking change that needs \
-         human judgment, stop and escalate it here in the chat.",
-        agent = agent.display_name(),
-    );
-
-    claude::exec_claude(&agent_path, &session_name, &system_ctx, &prompt);
 }
 
 /// Walks up from CWD until it finds a directory containing `.git`.
@@ -213,7 +143,7 @@ fn find_repo_root() -> Result<PathBuf> {
         }
         match dir.parent() {
             Some(parent) => dir = parent,
-            None => bail!(
+            None => anyhow::bail!(
                 "could not find a git repo root (no .git found above {})",
                 cwd.display()
             ),
