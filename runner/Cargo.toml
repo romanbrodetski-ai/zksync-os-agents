@@ -1,0 +1,11 @@
+[package]
+name = "runner"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "runner"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }

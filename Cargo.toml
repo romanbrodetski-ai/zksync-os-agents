@@ -1,0 +1,13 @@
+[workspace]
+members = ["runner"]
+exclude = [
+    "block-rebuild-maintainer",
+    "l1-settle",
+    "pipeline-correctness",
+    "sepolia-deploy",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
