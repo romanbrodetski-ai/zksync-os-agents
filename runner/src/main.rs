@@ -90,7 +90,7 @@ fn review_pr(agent_path: PathBuf, submodule_path: PathBuf, pr_number: u64) -> Re
         claude::run_claude(
             &agent_path,
             &format!("PR#{pr_number} sync-base"),
-            &prompts::system_ctx(),
+            prompts::SYSTEM_CTX,
             &prompts::agent_prompt(&current_sha, &base_sha),
         )?;
     } else {
@@ -102,7 +102,7 @@ fn review_pr(agent_path: PathBuf, submodule_path: PathBuf, pr_number: u64) -> Re
     claude::exec_claude(
         &agent_path,
         &format!("PR#{pr_number} review"),
-        &prompts::system_ctx(),
+        prompts::SYSTEM_CTX,
         &prompts::agent_prompt(&base_sha, &head_sha),
     );
 }
@@ -128,7 +128,7 @@ fn update_main(
     claude::exec_claude(
         &agent_path,
         "update-main",
-        &prompts::system_ctx(),
+        prompts::SYSTEM_CTX,
         &prompts::agent_prompt(&old_sha, &new_sha),
     );
 }
