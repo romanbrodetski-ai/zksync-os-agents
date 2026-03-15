@@ -7,6 +7,7 @@ use std::path::Path;
 pub fn exec(agent_dir: &Path, session_name: &str, system_ctx: &str, prompt: &str) -> ! {
     let err = std::process::Command::new("claude")
         .current_dir(agent_dir)
+        .arg("--dangerously-skip-permissions")
         .arg("--name")
         .arg(session_name)
         .arg("--append-system-prompt")
