@@ -96,24 +96,55 @@ fn review_pr(
     submodule_path: PathBuf,
     pr_number: u64,
 ) -> Result<()> {
-    let base_sha = git::submodule_sha(&submodule_path)?;
+    // --- Step 0: sync submodule to PR base branch ---
+    let pr_base_sha = git::pr_base_sha(pr_number)?;
+    let current_sha = git::submodule_sha(&submodule_path)?;
 
-    let session_name = format!("{} PR#{pr_number}", agent.display_name());
+    if current_sha != pr_base_sha {
+        println!(
+            "Submodule is at {current_sha}, PR base is {pr_base_sha}. Syncing…"
+        );
+        git::checkout_submodule_sha(&submodule_path, &pr_base_sha)?;
 
+        // Run the agent to update knowledge/tests to match the new base,
+        // same as update-main but targeting the PR base SHA.
+        let sync_session = format!("{} PR#{pr_number} sync-base", agent.display_name());
+        let agent_name = agent.display_name();
+        let sync_ctx = format!(
+            "Mode: sync-to-pr-base. \
+             Agent: {agent_name}. \
+             Server submodule updated from {current_sha} to {pr_base_sha} (PR #{pr_number} base).",
+        );
+        let sync_prompt = format!(
+            "The {agent}'s server submodule has been updated from {current_sha} to {pr_base_sha} \
+             to match the base branch of PR #{pr_number}.\n\
+             \n\
+             Update knowledge files and tests so they compile and pass against this version. \
+             Run the agent's test suite (command in AGENTS.md) to confirm. \
+             Commit knowledge/ and the bumped submodule pointer atomically before finishing.\n\
+             \n\
+             Do not review the PR itself yet — that happens in the next session.",
+            agent = agent.display_name(),
+        );
+
+        claude::run_claude(&agent_path, &sync_session, &sync_ctx, &sync_prompt)?;
+    } else {
+        println!("Submodule already at PR base {pr_base_sha}. Skipping sync.");
+    }
+
+    // --- Step 1+: run the actual PR review ---
+    let session_name = format!("{} PR#{pr_number} review", agent.display_name());
+    let agent_name = agent.display_name();
     let system_ctx = format!(
         "Mode: pr-review. \
-         Agent: {agent}. \
+         Agent: {agent_name}. \
          PR: #{pr_number} in matter-labs/zksync-os-server. \
-         Server submodule SHA (base branch): {base_sha}.",
-        agent = agent.display_name(),
+         Server submodule SHA (base): {pr_base_sha}.",
     );
-
     let prompt = format!(
         "Run the {agent} agent on PR #{pr_number}.\n\
          \n\
-         Follow the review process in AGENTS.md:\n\
-         - Step 0: sync the submodule to the PR base branch (already at {base_sha}; \
-           check it matches the PR base and update knowledge if the server has drifted).\n\
+         The submodule is already at the PR base ({pr_base_sha}). Start from Step 1:\n\
          - Step 1: fetch the diff with `gh pr diff {pr_number} -R matter-labs/zksync-os-server`.\n\
          - Steps 2–3: cross-reference knowledge, confirm issues with tests.\n\
          - Step 4: present all draft comments here before posting anything to GitHub.\n\

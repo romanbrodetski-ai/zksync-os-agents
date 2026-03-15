@@ -19,11 +19,19 @@ All agent workspaces share a single `target/` directory at the repo root (config
 
 ## Running an Agent
 
-Specify the agent when invoking:
+Agents are invoked via the `runner` binary (built with `cargo build -p runner`):
 
-> "Run the `<agent-name>` agent on PR #\<number\>"
+```sh
+# Review a PR — syncs submodule to PR base, updates knowledge/tests if needed, then opens review session
+cargo run -p runner -- --agent <agent> review-pr <pr-number>
 
-Each agent's `AGENTS.md` lists which PRs should activate it (in-scope files and directories).
+# Update agent to latest server main — advances submodule, syncs knowledge and tests
+cargo run -p runner -- --agent <agent> update-main
+```
+
+Available agents: `block-rebuild-maintainer`, `l1-settle`, `pipeline-correctness`, `sepolia-deploy`.
+
+Run from the repo root. The runner handles all git preconditions and opens an interactive Claude session.
 
 ---
 

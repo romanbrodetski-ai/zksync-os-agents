@@ -65,6 +65,59 @@ pub fn update_submodule_to_main(repo_root: &Path, agent_dir: &str) -> Result<(St
     Ok((old_sha, new_sha))
 }
 
+/// Returns the base branch commit SHA for a PR in matter-labs/zksync-os-server.
+pub fn pr_base_sha(pr_number: u64) -> Result<String> {
+    let out = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--repo",
+            "matter-labs/zksync-os-server",
+            "--json",
+            "baseRefOid",
+            "--jq",
+            ".baseRefOid",
+        ])
+        .output()
+        .context("failed to run gh pr view")?;
+
+    if !out.status.success() {
+        bail!(
+            "gh pr view failed for PR #{pr_number}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    Ok(String::from_utf8(out.stdout)?.trim().to_string())
+}
+
+/// Fetches from origin and checks out a specific SHA in the submodule (detached HEAD).
+pub fn checkout_submodule_sha(submodule_path: &Path, sha: &str) -> Result<()> {
+    let fetch = std::process::Command::new("git")
+        .args(["-C", path(submodule_path)?, "fetch", "origin"])
+        .status()
+        .context("failed to run git fetch")?;
+
+    if !fetch.success() {
+        bail!("git fetch failed in {}", submodule_path.display());
+    }
+
+    let checkout = std::process::Command::new("git")
+        .args(["-C", path(submodule_path)?, "checkout", "--detach", sha])
+        .status()
+        .context("failed to run git checkout")?;
+
+    if !checkout.success() {
+        bail!(
+            "git checkout {sha} failed in {}",
+            submodule_path.display()
+        );
+    }
+
+    Ok(())
+}
+
 fn path(p: &Path) -> Result<&str> {
     p.to_str()
         .with_context(|| format!("path is not valid UTF-8: {}", p.display()))
