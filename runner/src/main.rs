@@ -84,6 +84,7 @@ fn main() -> Result<()> {
                      run update-main first"
                 );
             }
+            git::print_diff_summary(&submodule_path, &base, &head)?;
             claude::exec(
                 &agent_path,
                 prompts::SYSTEM_CTX,
@@ -96,6 +97,7 @@ fn main() -> Result<()> {
                 println!("Already at {target} ({new}). Nothing to do.");
                 return Ok(());
             }
+            git::print_diff_summary(&submodule_path, &current, &new)?;
             claude::exec(
                 &agent_path,
                 prompts::SYSTEM_CTX,

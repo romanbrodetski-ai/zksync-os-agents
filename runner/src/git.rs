@@ -52,6 +52,43 @@ pub fn pr_shas(pr_number: u64) -> Result<(String, String)> {
     Ok((base, head))
 }
 
+/// Prints a human-readable summary of the diff between `from` and `to`:
+/// commits on each side (with dates) and per-file change stats.
+pub fn print_diff_summary(submodule_path: &Path, from: &str, to: &str) -> Result<()> {
+    // Symmetric log: commits in from but not to (<) and in to but not from (>).
+    println!("\n=== Commits ===");
+    let log = git(
+        submodule_path,
+        &[
+            "log",
+            "--left-right",
+            "--date=short",
+            "--format=%m %ad %h %s",
+            &format!("{from}...{to}"),
+        ],
+    )?;
+    if log.is_empty() {
+        println!("(no commits differ)");
+    } else {
+        // Label the arrows so the reader knows which direction is which.
+        println!("< = only in {}", &from[..from.len().min(12)]);
+        println!("> = only in {}", &to[..to.len().min(12)]);
+        println!("{log}");
+    }
+
+    // Diff stats: files changed, insertions, deletions.
+    println!("\n=== Changed files ===");
+    let stat = git(submodule_path, &["diff", "--stat", &format!("{from}..{to}")])?;
+    if stat.is_empty() {
+        println!("(no file changes)");
+    } else {
+        println!("{stat}");
+    }
+
+    println!();
+    Ok(())
+}
+
 /// Runs a git command in `dir`, checks success, and returns trimmed stdout.
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let out = std::process::Command::new("git")
