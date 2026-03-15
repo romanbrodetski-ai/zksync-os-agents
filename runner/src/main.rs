@@ -86,7 +86,6 @@ fn main() -> Result<()> {
             }
             claude::exec(
                 &agent_path,
-                &format!("PR#{pr_number}"),
                 prompts::SYSTEM_CTX,
                 &prompts::agent_prompt(&base, &head),
             );
@@ -99,7 +98,6 @@ fn main() -> Result<()> {
             }
             claude::exec(
                 &agent_path,
-                &format!("update {target}"),
                 prompts::SYSTEM_CTX,
                 &prompts::agent_prompt(&current, &new),
             );
