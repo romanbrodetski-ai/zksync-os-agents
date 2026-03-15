@@ -22,7 +22,7 @@ use zksync_os_mempool::{Pool, PoolConfig, TxValidatorConfig};
 use zksync_os_pipeline::{PeekableReceiver, PipelineComponent};
 use zksync_os_reth_compat::provider::ZkProviderFactory;
 use zksync_os_sequencer::execution::block_context_provider::BlockContextProvider;
-use zksync_os_sequencer::execution::{FeeConfig, FeeProvider};
+use zksync_os_sequencer::execution::{BlockCanonization, FeeConfig, FeeProvider, NoopCanonization};
 use zksync_os_sequencer::model::blocks::{BlockCommand, InvalidTxPolicy, SealPolicy};
 use zksync_os_storage_api::{
     ReadReplay, ReadRepository, ReadStateHistory, ReplayRecord, RepositoryResult, StateError,
@@ -302,7 +302,7 @@ fn make_fee_provider() -> FeeProvider {
         pubdata_price_rx,
         blob_fill_ratio_rx,
         token_price_rx,
-        Some(PubdataMode::Calldata),
+        PubdataMode::Calldata,
     )
 }
 
@@ -334,7 +334,10 @@ fn make_provider(next_l1_priority_id: u64) -> BlockContextProvider<impl zksync_o
         91,
         pool,
         Default::default(),
-        555,
+        555,         // previous_block_timestamp
+        1,           // next_block_number (unused by Rebuild branch)
+        Duration::from_millis(500), // block_time
+        100,         // max_transactions_in_block
         270,
         10_000_000,
         20_000_000,
@@ -360,6 +363,7 @@ async fn command_source_replays_then_rebuilds_then_produces() {
         replay_record(2, 5, vec![l1_tx(5)]),
         replay_record(3, 0, vec![upgrade_tx(sample_protocol_version())]),
     ]);
+    let (_replays_tx, replays_to_execute) = mpsc::channel(1);
     let source = MainNodeCommandSource {
         block_replay_storage: storage,
         starting_block: 1,
@@ -367,8 +371,7 @@ async fn command_source_replays_then_rebuilds_then_produces() {
             rebuild_from_block: 2,
             blocks_to_empty: HashSet::from([3]),
         }),
-        block_time: Duration::from_secs(1),
-        max_transactions_in_block: 100,
+        replays_to_execute,
     };
 
     let commands = collect_commands(source, 4).await;
@@ -387,6 +390,7 @@ async fn command_source_rebuild_from_starting_block_skips_replay_phase() {
         replay_record(2, 0, vec![]),
         replay_record(3, 0, vec![]),
     ]);
+    let (_replays_tx, replays_to_execute) = mpsc::channel(1);
     let source = MainNodeCommandSource {
         block_replay_storage: storage,
         starting_block: 2,
@@ -394,8 +398,7 @@ async fn command_source_rebuild_from_starting_block_skips_replay_phase() {
             rebuild_from_block: 2,
             blocks_to_empty: HashSet::new(),
         }),
-        block_time: Duration::from_secs(1),
-        max_transactions_in_block: 100,
+        replays_to_execute,
     };
 
     let commands = collect_commands(source, 3).await;
@@ -406,11 +409,12 @@ async fn command_source_rebuild_from_starting_block_skips_replay_phase() {
 }
 
 #[tokio::test]
-#[should_panic(expected = "rebuild_from_block must be >= block_to_start")]
+#[should_panic(expected = "rebuild_from_block must be >= starting_block")]
 async fn command_source_rejects_rebuild_before_starting_block() {
     // Fail-first validation: removed the lower-bound assert in `command_source`, which let the
     // source start and made this panic expectation fail.
     let storage = FakeReplayStorage::new([replay_record(3, 0, vec![])]);
+    let (_replays_tx, replays_to_execute) = mpsc::channel(1);
     let source = MainNodeCommandSource {
         block_replay_storage: storage,
         starting_block: 3,
@@ -418,8 +422,7 @@ async fn command_source_rejects_rebuild_before_starting_block() {
             rebuild_from_block: 2,
             blocks_to_empty: HashSet::new(),
         }),
-        block_time: Duration::from_secs(1),
-        max_transactions_in_block: 100,
+        replays_to_execute,
     };
 
     run_command_source_to_completion(source).await;
@@ -431,6 +434,7 @@ async fn command_source_rejects_rebuild_after_latest_record() {
     // Fail-first validation: changed the upper-bound assert to a strict `< last_block_in_wal`
     // check, which produced a different panic and made this expectation fail.
     let storage = FakeReplayStorage::new([replay_record(3, 0, vec![])]);
+    let (_replays_tx, replays_to_execute) = mpsc::channel(1);
     let source = MainNodeCommandSource {
         block_replay_storage: storage,
         starting_block: 3,
@@ -438,8 +442,7 @@ async fn command_source_rejects_rebuild_after_latest_record() {
             rebuild_from_block: 4,
             blocks_to_empty: HashSet::new(),
         }),
-        block_time: Duration::from_secs(1),
-        max_transactions_in_block: 100,
+        replays_to_execute,
     };
 
     run_command_source_to_completion(source).await;
@@ -608,7 +611,10 @@ fn make_provider_with_block_hashes(
         91,
         pool,
         block_hashes,
-        555,
+        555,         // previous_block_timestamp
+        1,           // next_block_number (unused by Rebuild branch)
+        Duration::from_millis(500), // block_time
+        100,         // max_transactions_in_block
         270,
         10_000_000,
         20_000_000,
@@ -633,12 +639,12 @@ async fn command_source_no_rebuild_replays_all_then_produces() {
         replay_record(11, 0, vec![]),
         replay_record(12, 0, vec![]),
     ]);
+    let (_replays_tx, replays_to_execute) = mpsc::channel(1);
     let source = MainNodeCommandSource {
         block_replay_storage: storage,
         starting_block: 10,
         rebuild_options: None,
-        block_time: Duration::from_secs(1),
-        max_transactions_in_block: 100,
+        replays_to_execute,
     };
 
     // 3 replay commands + 1 produce command.
@@ -647,7 +653,8 @@ async fn command_source_no_rebuild_replays_all_then_produces() {
     assert!(matches!(&commands[0], BlockCommand::Replay(r) if r.block_context.block_number == 10));
     assert!(matches!(&commands[1], BlockCommand::Replay(r) if r.block_context.block_number == 11));
     assert!(matches!(&commands[2], BlockCommand::Replay(r) if r.block_context.block_number == 12));
-    assert!(matches!(&commands[3], BlockCommand::Produce(p) if p.block_number == 13));
+    // ProduceCommand is now a unit struct: block number is tracked inside BlockContextProvider.
+    assert!(matches!(&commands[3], BlockCommand::Produce(_)));
 }
 
 #[tokio::test]
@@ -778,5 +785,44 @@ async fn rebuild_prepare_uses_provider_block_hashes_not_replay_record() {
         prepared.block_context.block_hashes,
         BlockHashes::default(),
         "sanity: the two values must be distinct"
+    );
+}
+
+/// Confirms that NoopCanonization's channel capacity is at least MAX_PRODUCED_QUEUE_SIZE (2).
+/// arrive before the first canonization is drained.
+///
+/// Fail-first validation: this test fails (hangs until timeout) on the current PR code because
+/// NoopCanonization::new() uses mpsc::channel(1) while MAX_PRODUCED_QUEUE_SIZE = 2. When
+/// tokio::select! picks the maybe_executed arm for block2 while block1's canonization is still
+/// sitting in the channel, propose(block2).await blocks forever waiting for the channel to
+/// drain — but the only drainer (the canonized arm) is unreachable while the task is blocked.
+/// The fix is to increase NoopCanonization's channel capacity to at least MAX_PRODUCED_QUEUE_SIZE.
+/// Confirms that NoopCanonization's channel capacity is at least MAX_PRODUCED_QUEUE_SIZE (2).
+///
+/// In BlockCanonizer::run, MAX_PRODUCED_QUEUE_SIZE = 2, meaning up to 2 produced blocks can be
+/// queued for canonization before the input arm is disabled. When tokio::select! picks the
+/// maybe_executed arm for block2 while block1's propose() result is still sitting in the channel,
+/// propose(block2).await deadlocks: the task blocks waiting for channel capacity, but the only
+/// consumer (the canonized arm) is unreachable because the task is stuck.
+///
+/// Fail-first validation: this test times out on the current PR code because
+/// NoopCanonization::new() creates mpsc::channel(1) while MAX_PRODUCED_QUEUE_SIZE = 2.
+/// Fix: use mpsc::channel(2) (or MAX_PRODUCED_QUEUE_SIZE) in NoopCanonization::new().
+#[tokio::test]
+async fn noop_canonization_channel_supports_max_produced_queue_size_proposals() {
+    let noop = NoopCanonization::new();
+
+    // Propose 2 blocks without draining between them.
+    // If channel capacity < 2, propose(block2).await will block forever.
+    let result = tokio::time::timeout(Duration::from_secs(5), async {
+        noop.propose(replay_record(1, 0, vec![])).await.unwrap();
+        noop.propose(replay_record(2, 0, vec![])).await.unwrap();
+    })
+    .await;
+
+    result.expect(
+        "NoopCanonization channel capacity (1) < MAX_PRODUCED_QUEUE_SIZE (2): \
+         propose(block2) deadlocked because the channel was full. \
+         Fix: use mpsc::channel(2) in NoopCanonization::new().",
     );
 }
