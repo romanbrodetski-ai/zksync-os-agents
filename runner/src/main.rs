@@ -51,8 +51,11 @@ enum Command {
         /// GitHub PR number (in matter-labs/zksync-os-server)
         pr_number: u64,
     },
-    /// Advance the agent's server submodule to latest main, sync knowledge and tests.
-    UpdateMain,
+    /// Update the agent to a specific server commit: branch, tag, or SHA.
+    Update {
+        /// Git ref to update to (branch, tag, or full SHA)
+        target: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -88,15 +91,15 @@ fn main() -> Result<()> {
                 &prompts::agent_prompt(&base, &head),
             );
         }
-        Command::UpdateMain => {
-            let new = git::server_main_sha(&submodule_path)?;
+        Command::Update { target } => {
+            let new = git::resolve_ref(&submodule_path, &target)?;
             if current == new {
-                println!("Already at latest main ({new}). Nothing to do.");
+                println!("Already at {target} ({new}). Nothing to do.");
                 return Ok(());
             }
             claude::exec(
                 &agent_path,
-                "update-main",
+                &format!("update {target}"),
                 prompts::SYSTEM_CTX,
                 &prompts::agent_prompt(&current, &new),
             );

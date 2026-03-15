@@ -19,10 +19,13 @@ pub fn current_sha(submodule_path: &Path) -> Result<String> {
     git(submodule_path, &["rev-parse", "HEAD"])
 }
 
-/// Fetches origin and returns the SHA of origin/main.
-pub fn server_main_sha(submodule_path: &Path) -> Result<String> {
-    git_status(submodule_path, &["fetch", "origin", "main"])?;
-    git(submodule_path, &["rev-parse", "origin/main"])
+/// Fetches origin and resolves a git ref (branch, tag, or SHA) to a concrete SHA.
+pub fn resolve_ref(submodule_path: &Path, git_ref: &str) -> Result<String> {
+    git_status(submodule_path, &["fetch", "origin"])?;
+    // Try as-is first (full SHA, tag, local ref), then as a remote branch name.
+    git(submodule_path, &["rev-parse", git_ref])
+        .or_else(|_| git(submodule_path, &["rev-parse", &format!("origin/{git_ref}")]))
+        .with_context(|| format!("could not resolve ref '{git_ref}'"))
 }
 
 /// Returns (base_sha, head_sha) for a PR in matter-labs/zksync-os-server.
