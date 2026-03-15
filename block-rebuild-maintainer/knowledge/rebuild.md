@@ -7,12 +7,14 @@ Scope:
 
 Core flow:
 - Startup chooses the earliest block that must be replayed to restore correctness.
-- `MainNodeCommandSource` calls the `command_source()` free function which returns a `BoxStream`. It emits `Replay` commands up to `rebuild_from_block - 1`, then `Rebuild` commands for `[rebuild_from_block..=latest_record]`, then an infinite stream of `Produce` commands.
-- `ProduceCommand` now carries `block_number`, `block_time`, and `max_transactions_in_block` (moved from `BlockContextProvider`).
+- `MainNodeCommandSource.run()` directly sends commands over the output channel (no intermediate `BoxStream`). It emits `Replay` commands up to `rebuild_from_block - 1`, then `Rebuild` commands for `[rebuild_from_block..=latest_record]`, then enters `run_loop` which produces `Produce` commands indefinitely.
+- `ProduceCommand` is a unit struct; `block_number`, `block_time`, and `max_transactions_in_block` are held inside `BlockContextProvider` and tracked via `next_block_number` (incremented in `on_block_executed`).
 - `BlockContextProvider` converts `Rebuild` into execution-ready commands.
+- After WAL replay and rebuilds, the main node pipeline is: `BlockExecutor → BlockCanonizer → BlockApplier`.
+- `BlockCanonizer` holds `MAX_PRODUCED_QUEUE_SIZE = 2` in-flight produced/rebuild blocks before applying backpressure. `NoopCanonization`'s internal channel **must have capacity ≥ MAX_PRODUCED_QUEUE_SIZE** (currently 2) to avoid a deadlock where `propose(blockN).await` blocks with the channel full while `next_canonized()` is unreachable.
 
 Important invariants:
-- `rebuild_from_block` must be within `[block_to_start, latest_record]` (asserted as `rebuild_from_block >= block_to_start` and `rebuild_from_block <= last_block_in_wal`).
+- `rebuild_from_block` must be within `[starting_block, latest_record]` (asserted as `rebuild_from_block >= starting_block` and `rebuild_from_block <= last_block_in_wal`).
 - Rebuild keeps the original block number, timestamp, fee params, execution version, protocol version and force preimages from the replay record.
 - Rebuild does not reuse the old block hash chain. It uses the provider's current `block_hashes_for_next_block`.
 - Rebuild starts from the provider's current cursors:
@@ -39,4 +41,5 @@ No-rebuild path:
 Testing strategy:
 - Cover command sequencing and rebuild preparation separately.
 - For each test, validate it with a temporary code mutation that removes the guarded behavior, then restore the production code.
-- All 13 tests have been fail-first validated (mutation applied → test failed → mutation reverted → test passes).
+- All 14 tests have been fail-first validated (mutation applied → test failed → mutation reverted → test passes).
+- `noop_canonization_channel_supports_max_produced_queue_size_proposals`: guards that `NoopCanonization`'s channel capacity is ≥ `MAX_PRODUCED_QUEUE_SIZE` (2). Fails with a 5 s timeout if capacity is 1.
