@@ -84,25 +84,26 @@ fn review_pr(agent_path: PathBuf, submodule_path: PathBuf, pr_number: u64) -> Re
     let (base_sha, head_sha) = git::pr_shas(pr_number)?;
     let current_sha = git::submodule_sha(&submodule_path)?;
 
-    // Sync to PR base if needed (agent updates knowledge/tests, then commits).
+    // If submodule is behind the PR base, sync knowledge/tests to base first.
     if current_sha != base_sha {
         println!("Syncing to PR base: {current_sha} → {base_sha}");
         claude::run_claude(
             &agent_path,
             &format!("PR#{pr_number} sync-base"),
             &prompts::system_ctx(),
-            &prompts::sync_prompt(&current_sha, &base_sha),
+            &prompts::agent_prompt(&current_sha, &base_sha),
         )?;
     } else {
         println!("Submodule already at PR base {base_sha}. Skipping sync.");
     }
 
-    // Review the PR diff (base → head). Submodule stays at base_sha.
+    // Now examine the PR diff: base → head.
+    println!("Reviewing PR#{pr_number}: {base_sha} → {head_sha}");
     claude::exec_claude(
         &agent_path,
         &format!("PR#{pr_number} review"),
         &prompts::system_ctx(),
-        &prompts::review_prompt(&base_sha, &head_sha),
+        &prompts::agent_prompt(&base_sha, &head_sha),
     );
 }
 
@@ -110,9 +111,8 @@ fn update_main(
     agent: Agent,
     repo_root: PathBuf,
     agent_path: PathBuf,
-    submodule_path: PathBuf,
+    _submodule_path: PathBuf,
 ) -> Result<()> {
-    let current_sha = git::submodule_sha(&submodule_path)?;
     let (old_sha, new_sha) = git::update_submodule_to_main(&repo_root, agent.dir())?;
 
     if old_sha == new_sha {
@@ -120,16 +120,16 @@ fn update_main(
         return Ok(());
     }
 
-    // Restore submodule to old SHA — agent will do the checkout itself after
-    // reading the diff, keeping the transition fully under its control.
-    git::checkout_submodule_sha(&submodule_path, &current_sha)?;
+    // Restore submodule to old SHA — agent checks out new SHA itself as part of its work.
+    let submodule_path = repo_root.join(agent.dir()).join("zksync-os-server");
+    git::checkout_submodule_sha(&submodule_path, &old_sha)?;
 
     println!("Updating: {old_sha} → {new_sha}");
     claude::exec_claude(
         &agent_path,
         "update-main",
         &prompts::system_ctx(),
-        &prompts::sync_prompt(&old_sha, &new_sha),
+        &prompts::agent_prompt(&old_sha, &new_sha),
     );
 }
 
