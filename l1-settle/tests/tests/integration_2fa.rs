@@ -49,19 +49,23 @@ async fn t8_1_commit_succeeds_with_2fa_threshold_1() -> anyhow::Result<()> {
 }
 
 // ------------------------------------------------------------------
-// T8.2 — Node warns (not crashes) on 2FA threshold config mismatch, then settles
+// T8.2 — Node handles 2FA threshold config mismatch gracefully and still settles
 // ------------------------------------------------------------------
-// The node reads the on-chain threshold at startup and warns if it differs from config.
-// It must still proceed with the on-chain threshold value and successfully commit.
+// When server threshold > L1 threshold: no startup warning (safe direction; server enforces
+// a stricter requirement). When server threshold < L1 threshold: `check_batch_verification_mismatch`
+// emits a warning at startup (added in server commit ad0fcab7).
 //
-// Mutation: promote warning to panic → node crashes on mismatch → no batch ever committed.
+// This test configures server threshold=2 with on-chain threshold=1 (server > L1, no startup
+// warning). The pipeline uses effective threshold = max(2, 1) = 2 and must still settle.
+//
+// Mutation: crash on any threshold mismatch → no batch ever committed.
 #[test_log::test(tokio::test)]
 async fn t8_2_threshold_mismatch_warns_but_settles() -> anyhow::Result<()> {
     // The on-chain contract has threshold=1 (set by the l1-state fixture).
-    // We configure threshold=2 in the server, which mismatches the on-chain value.
-    // The node should warn but use the on-chain value (1) and still settle.
+    // We configure threshold=2 in the server (server > L1: no startup warning from
+    // check_batch_verification_mismatch). The pipeline uses effective threshold=max(2,1)=2.
     let tester = Tester::builder()
-        .batch_verification(2) // intentional mismatch vs on-chain threshold of 1
+        .batch_verification(2) // server threshold=2, L1 threshold=1 (server > L1)
         .build()
         .await?;
 

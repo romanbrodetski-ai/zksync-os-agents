@@ -1,9 +1,10 @@
 # Final Report — L1 Settling Agent (agents/l1-settle)
 
-**Date**: 2026-03-14
+**Date**: 2026-03-15
 **Crate**: `zksync_os_l1_settle_tests` (`agents/l1-settle/tests/`)
 **Unit tests passing**: 22 / 22
 **Integration tests**: compile-clean, run against Anvil on `cargo nextest run -p zksync_os_l1_settle_tests`
+**Server submodule**: b68775b670ad5a67d54ff1f82b34d08465318986 (bumped from 86563a6995934fcac041a22e3de22b66a306089c)
 
 ---
 
@@ -84,7 +85,7 @@ Out of scope (deferred to future Sepolia-based tests): blob DA, real-prover path
 | ID | Test | What it catches |
 |----|------|-----------------|
 | T8.1 | `t8_1_commit_succeeds_with_2fa_threshold_1` | full pipeline completes with threshold=1 signing |
-| T8.2 | `t8_2_threshold_mismatch_warns_but_settles` | configured threshold=2 vs on-chain threshold=1 — node warns and uses on-chain value, still settles |
+| T8.2 | `t8_2_threshold_mismatch_warns_but_settles` | server threshold=2 > L1 threshold=1 (safe direction): no startup warning, pipeline uses effective threshold=max(2,1)=2, still settles |
 
 ---
 

@@ -55,6 +55,7 @@ The L1 settling pipeline commits, proves, and executes ZKsync OS batches on Ethe
 8. When `BatchVerificationSL::Enabled`, the commit must carry ≥ `threshold` signatures from the allowed validator set; threshold=0 is allowed without any signatures.
 9. Signatures are sorted by signer address before encoding.
 10. `AlreadyCommitted` or `NotNeeded` signature data is accepted when 2FA is disabled or threshold=0.
+22. At startup (main node only), `check_batch_verification_mismatch` warns when the node's configured `threshold` is **lower** than the on-chain threshold; the pipeline then enforces the effective threshold via `max(server.threshold, l1.threshold)`. No warning is issued when the server threshold is higher (safe direction).
 
 ### SNARK public input
 11. For each batch `i`: `public_input_i = keccak(prev_state_commitment || state_commitment || commitment)`.
@@ -65,6 +66,11 @@ The L1 settling pipeline commits, proves, and executes ZKsync OS batches on Ethe
 14. `StoredBatchInfo::hash()` = `keccak256(ABI-encode(IExecutor::StoredBatchInfo))`.
 15. Fields `indexRepeatedStorageChanges` and `timestamp` are hardcoded to zero for ZKsync OS batches.
 16. `batchHash` stores `state_commitment`; `commitment` stores `batch_output_hash` (not a generic hash).
+
+### Node role config requirements
+23. `L1SenderConfig::pubdata_mode` is `Option<PubdataMode>`. On the main node it **must** be set (the node panics with `.expect()` if absent). External nodes set it to `None` since they replay blocks and never produce them.
+24. `Config::external_price_api_client_config` is `Option<ExternalPriceApiClientConfig>`. On the main node it **must** be set. ENs may omit it.
+25. All pubdata-mode / DA-mode consistency checks (panic on mismatch) and the `check_batch_verification_mismatch` warning are guarded by `if node_role.is_main()` and are skipped on external nodes.
 
 ### L1 transaction lifecycle
 17. Transactions are sent with 1 required confirmation and a 300-second timeout; a timeout causes a crash-and-restart recovery.
@@ -87,6 +93,8 @@ The L1 settling pipeline commits, proves, and executes ZKsync OS batches on Ethe
 - **Threshold=0 with 2FA enabled**: allowed per code; edge case that bypasses signature requirement.
 - **`last_block_timestamp` in `StoredBatchInfo`**: field is ignored in `PartialEq` (explicitly skipped); present in struct for wire-format compatibility but semantically unused.
 - **Multiple batches in one prove/execute tx**: `ProofCommand` and `ExecuteCommand` both support batch ranges; `CommitCommand` is always single-batch.
+- **`pubdata_mode` missing on main node**: if the operator omits `l1_sender_pubdata_mode` from config, the main node panics at startup. There is no longer a default value (previously defaulted to `Blobs`).
+- **EN with `pubdata_mode = None`**: `FeeProvider::calculate_pubdata_price` calls `.expect()` on `pubdata_mode`, but this function is only reached via `BlockCommand::Produce`. ENs only handle `BlockCommand::Replay`, so the panic is unreachable in practice.
 
 ---
 
