@@ -9,6 +9,7 @@ This repo contains maintenance agents that review PRs, keep knowledge bases curr
 | `block-rebuild-maintainer` | `block-rebuild-maintainer/` | Block rebuild / replay-transition behavior |
 | `l1-settle` | `l1-settle/` | Settling batches on L1 |
 | `pipeline-correctness` | `pipeline-correctness/` | Block processing pipeline correctness |
+| `sepolia-deploy` | `sepolia-deploy/` | Sepolia chain deployment, gas costs, rollout UX |
 
 ## Repository Structure
 
