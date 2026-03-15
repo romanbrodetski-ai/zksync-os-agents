@@ -63,7 +63,7 @@ pub fn print_diff_summary(submodule_path: &Path, from: &str, to: &str) -> Result
             "log",
             "--left-right",
             "--date=short",
-            "--format=%m %ad %h %s",
+            "--format=%m %ad %h %an: %s",
             &format!("{from}...{to}"),
         ],
     )?;
