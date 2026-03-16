@@ -196,6 +196,8 @@ pub struct MockWriteState {
 struct MockStateInner {
     /// Tracks which block numbers were written and whether override was allowed.
     write_log: Vec<(u64, bool)>,
+    /// If set, add_block_result() returns Err for this block number (simulates crash).
+    fail_on_block: Option<u64>,
 }
 
 impl MockWriteState {
@@ -203,8 +205,21 @@ impl MockWriteState {
         Self {
             inner: Arc::new(Mutex::new(MockStateInner {
                 write_log: vec![],
+                fail_on_block: None,
             })),
         }
+    }
+
+    /// Configure this mock to fail when writing a specific block number.
+    /// Simulates a crash between WriteReplay and WriteState.
+    pub fn with_fail_on_block(self, block_number: u64) -> Self {
+        self.inner.lock().unwrap().fail_on_block = Some(block_number);
+        self
+    }
+
+    /// Clear the failure injection (simulates successful restart).
+    pub fn clear_failure(&self) {
+        self.inner.lock().unwrap().fail_on_block = None;
     }
 
     pub fn write_log(&self) -> Vec<(u64, bool)> {
@@ -223,11 +238,13 @@ impl WriteState for MockWriteState {
     where
         J: IntoIterator<Item = (B256, &'a Vec<u8>)>,
     {
-        self.inner
-            .lock()
-            .unwrap()
-            .write_log
-            .push((block_number, override_allowed));
+        let mut inner = self.inner.lock().unwrap();
+        if inner.fail_on_block == Some(block_number) {
+            return Err(anyhow::anyhow!(
+                "simulated crash: WriteState failed on block {block_number}"
+            ));
+        }
+        inner.write_log.push((block_number, override_allowed));
         Ok(())
     }
 }

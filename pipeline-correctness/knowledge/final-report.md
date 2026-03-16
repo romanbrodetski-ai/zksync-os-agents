@@ -39,16 +39,19 @@ internals, RPC layer.
 | Pipeline FIFO ordering | pipeline_flow | ordering_preserved_through_multiple_stages, basic_pipeline_flow |
 | Error propagation | pipeline_flow, backpressure | error_propagates_through_channel_closure, dropped_receiver_unblocks_sender |
 | Preimage injection correctness | state_override | preimage_override_shadows_base, preimage_falls_through_to_base, storage_falls_through_with_preimage_override, etc. |
+| Crash recovery (WAL replay) | crash_recovery | crash_after_wal_write_recovers_on_replay, recovery_replays_multiple_blocks_idempotently, wal_duplicate_write_does_not_block_downstream_stores |
+| Rebuild override propagation | crash_recovery | rebuild_recovery_uses_override |
 | Command type structure | sequencer | produce_command_carries_block_params, block_command_block_number, sequencer_output_type_is_two_tuple |
 | Replay stream ordering | sequencer | replay_stream_returns_records_in_order |
 | ReplayRecord equality semantics | replay_storage | replay_record_equality_ignores_node_version, replay_record_inequality_on_output_hash |
 
 ## Tests added
 
-5 test modules, 26 tests total:
+6 test modules, 35 tests total:
 
 - **sequencer** (4 tests): command structure, block_number(), output type, replay stream ordering
 - **backpressure** (4 tests): slow consumer blocking, zero buffer panic, dropped receiver, end-to-end propagation
+- **crash_recovery** (4 tests): partial persistence recovery, multi-block idempotent replay, rebuild override propagation, WAL duplicate write passthrough
 - **pipeline_flow** (5 tests): basic flow, chained transformation, ordering preservation, error propagation, builder spawn
 - **replay_storage** (10 tests): genesis, sequential writes, duplicates, overrides, non-sequential panic, range retrieval, context consistency, monotonic latest, write log, equality semantics
 - **state_override** (7 tests): shadow, fall-through, missing, storage independence, multiple overrides, combined scenario, empty overrides
@@ -66,7 +69,7 @@ None found in the current codebase. The following are areas of elevated risk:
 
 1. **Non-atomic three-store writes**: WriteReplay → WriteState → WriteRepository is not
    transactional. A crash between stores leaves inconsistent state. Recovery relies on WAL
-   replay, which is correct but untested at the integration level.
+   replay, which is now tested in `crash_recovery` module.
 
 2. **OUTPUT_BUFFER_SIZE = 0 is unvalidated**: The pipeline builder passes this directly to
    `mpsc::channel()`, which panics on 0. No compile-time or runtime guard exists.
@@ -79,7 +82,6 @@ None found in the current codebase. The following are areas of elevated risk:
 
 - **Full Sequencer integration test**: No test runs the actual Sequencer::run() with mock
   storage through a sequence of blocks. Current tests exercise components in isolation.
-- **Crash recovery**: WAL replay after partial persistence is not tested.
 - **L1 priority transaction ordering**: The mempool ordering contract is documented but
   not tested by this agent (likely belongs to a mempool agent).
 - **Cancellation safety**: tokio::select! branches in pipeline components are not tested
@@ -90,9 +92,7 @@ None found in the current codebase. The following are areas of elevated risk:
 
 1. Add an integration test that runs the Sequencer with MockReplayStorage, MockWriteState,
    and MockRepository through a sequence of Produce and Replay commands.
-2. Add a crash-recovery test: write blocks 1-5, simulate crash after block 3's WriteReplay
-   but before WriteRepository, restart and verify replay fills the gap.
-3. When reviewing PRs that add new pipeline components, verify they declare a reasonable
+2. When reviewing PRs that add new pipeline components, verify they declare a reasonable
    OUTPUT_BUFFER_SIZE (>= 1) and that their run() method is cancellation-safe.
 4. Keep the mock implementations aligned with the real storage trait contracts; divergence
    reduces test confidence.

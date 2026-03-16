@@ -192,9 +192,32 @@ Each test states: what it protects, what it checks, and what regression would br
 
 ---
 
+## 9. Crash Recovery
+
+### `crash_recovery::crash_after_wal_write_recovers_on_replay`
+- **Protects:** Partial persistence (WAL succeeds, WriteState fails) is recoverable via replay
+- **Checks:** After simulated crash on block 3, WAL has the block but state/repo don't. After recovery replay, all three stores converge.
+- **Breaks if:** Sequencer starts checking WriteReplay return value and skipping downstream stores
+
+### `crash_recovery::recovery_replays_multiple_blocks_idempotently`
+- **Protects:** Recovery can replay blocks that are already in all stores without corruption
+- **Checks:** Block 1 (already complete) is re-processed during recovery alongside block 2 (incomplete). Both succeed.
+- **Breaks if:** WriteState or WriteRepository reject duplicate writes during recovery
+
+### `crash_recovery::rebuild_recovery_uses_override`
+- **Protects:** Rebuild commands pass override_allowed=true through to all three stores
+- **Checks:** Both original and rebuild writes recorded with correct override flags
+- **Breaks if:** override_allowed not propagated correctly for Rebuild commands
+
+### `crash_recovery::wal_duplicate_write_does_not_block_downstream_stores`
+- **Protects:** The critical property: WriteReplay returning false does not prevent WriteState/WriteRepository from receiving the block
+- **Checks:** Block written only to WAL, then full Sequencer write sequence re-run — state and repo get the data despite WAL returning false
+- **Breaks if:** Sequencer starts branching on WriteReplay return value
+
+---
+
 ## Known gaps (not yet tested)
 
-- **Crash recovery**: No test exercises WAL replay filling gaps after partial persistence
 - **L1 priority ordering**: Transaction selection ordering from mempool not tested at integration level
 - **Cancellation safety**: No test verifies tokio::select! branches are cancellation-safe
 - **Config optionality**: No test verifies main-node vs external-node config guards
