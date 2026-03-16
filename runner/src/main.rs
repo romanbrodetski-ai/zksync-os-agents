@@ -17,8 +17,8 @@ struct Cli {
     #[arg(long, default_value = "claude")]
     ai: Ai,
 
-    #[arg(long, default_value = "claude-opus-4-6")]
-    model: String,
+    #[arg(long)]
+    model: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -90,12 +90,12 @@ fn main() -> Result<()> {
             git::print_diff_summary(&submodule_path, &base, &head)?;
 
             let start = std::time::Instant::now();
-            run_ai(&cli.ai, &agent_path, &prompts::system_ctx(), &prompts::agent_prompt(&base, &head), &cli.model)?;
+            run_ai(&cli.ai, &agent_path, &prompts::system_ctx(), &prompts::agent_prompt(&base, &head), cli.model.as_deref())?;
             let duration = start.elapsed();
 
             let server_pr = gh::find_server_pr_url(&server_repo, &head);
             if let Some(agent_pr) = gh::latest_open_pr_url(&agent_path)? {
-                gh::prepend_pr_metadata(&agent_pr, bot_name, &cli.model, duration, server_pr)?;
+                gh::prepend_pr_metadata(&agent_pr, bot_name, cli.model.as_deref(), duration, server_pr)?;
             }
         }
         Command::Update { target } => {
@@ -107,12 +107,12 @@ fn main() -> Result<()> {
             git::print_diff_summary(&submodule_path, &current, &new)?;
 
             let start = std::time::Instant::now();
-            run_ai(&cli.ai, &agent_path, &prompts::system_ctx(), &prompts::agent_prompt(&current, &new), &cli.model)?;
+            run_ai(&cli.ai, &agent_path, &prompts::system_ctx(), &prompts::agent_prompt(&current, &new), cli.model.as_deref())?;
             let duration = start.elapsed();
 
             let server_pr = gh::find_server_pr_url("matter-labs/zksync-os-server", &new);
             if let Some(agent_pr) = gh::latest_open_pr_url(&agent_path)? {
-                gh::prepend_pr_metadata(&agent_pr, bot_name, &cli.model, duration, server_pr)?;
+                gh::prepend_pr_metadata(&agent_pr, bot_name, cli.model.as_deref(), duration, server_pr)?;
             }
         }
     }
@@ -120,7 +120,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_ai(ai: &Ai, agent_dir: &std::path::Path, system_ctx: &str, prompt: &str, model: &str) -> Result<()> {
+fn run_ai(ai: &Ai, agent_dir: &std::path::Path, system_ctx: &str, prompt: &str, model: Option<&str>) -> Result<()> {
     match ai {
         Ai::Claude => claude::run(agent_dir, system_ctx, prompt, model),
         Ai::Codex => codex::run(agent_dir, system_ctx, prompt, model),

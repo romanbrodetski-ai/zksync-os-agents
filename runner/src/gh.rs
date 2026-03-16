@@ -44,7 +44,7 @@ pub fn latest_open_pr_url(dir: &Path) -> Result<Option<String>> {
 pub fn prepend_pr_metadata(
     pr_url: &str,
     bot_name: &str,
-    model: &str,
+    model: Option<&str>,
     duration: Duration,
     server_pr_url: Option<String>,
 ) -> Result<()> {
@@ -59,9 +59,11 @@ pub fn prepend_pr_metadata(
         None => "N/A".to_string(),
     };
 
+    let model_str = model.unwrap_or("default");
+
     let new_body = format!(
         "**Agent**: {bot_name}  \n\
-         **Model**: {model}  \n\
+         **Model**: {model_str}  \n\
          **Duration**: {mins}m {secs}s  \n\
          **Server PR**: {server_line}  \n\
          \n\
