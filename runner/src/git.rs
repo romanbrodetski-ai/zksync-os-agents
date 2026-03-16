@@ -1,6 +1,19 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
+/// Fails if the submodule has not been initialized (i.e. `git submodule update --init` not run).
+pub fn check_submodule_initialized(submodule_path: &Path) -> Result<()> {
+    // An initialized submodule has a .git file (not directory) pointing to the parent's gitdir.
+    if !submodule_path.join(".git").exists() {
+        bail!(
+            "submodule {} is not initialized — run `git submodule update --init {}`",
+            submodule_path.display(),
+            submodule_path.display(),
+        );
+    }
+    Ok(())
+}
+
 /// Fails if the submodule working tree has any uncommitted or untracked changes.
 pub fn check_submodule_clean(submodule_path: &Path) -> Result<()> {
     let out = git(submodule_path, &["status", "--porcelain"])?;
