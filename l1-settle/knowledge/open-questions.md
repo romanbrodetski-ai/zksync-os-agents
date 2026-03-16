@@ -65,23 +65,3 @@ fake-proof submissions silently.
 
 **Answer:** *(not yet provided)*
 
----
-
-## Q6 — v2 batch verification wire transport and v31 rollout coordination
-
-`lib/types/src/protocol/mod.rs` has a TODO at `is_live()` (added in server commit 53c09b5):
-
-> "Do not update to v31 without devp2p upgrade on batch verification. With current code, only
-> v1 batch verification transport is supported (pre-v31). As such, batch verification will be
-> incomplete and will compromise 2FA security on v31. v2 wire transport is needed for batch
-> verification to work on v31."
-
-The v2 wire format module (`lib/batch_verification/src/wire_format/v2`) exists in the codebase
-but is deliberately not wired to the active transport path. The comment says it should be
-reintroduced "deliberately when the protocol upgrade is ready and EN rollout can happen in
-lockstep with the wire-format bump."
-
-What is the planned rollout sequence for v2 wire transport, and is there a tracking issue or
-milestone to ensure the TODO is not silently bypassed when v31 is promoted in `is_live()`?
-
-**Answer:** *(not yet provided)*

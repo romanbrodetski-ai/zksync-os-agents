@@ -13677,7 +13677,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2",
  "smart-config",
  "tar",
  "tempfile",

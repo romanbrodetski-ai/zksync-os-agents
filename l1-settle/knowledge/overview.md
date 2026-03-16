@@ -55,12 +55,10 @@ The L1 settling pipeline commits, proves, and executes ZKsync OS batches on Ethe
 8. When `BatchVerificationSL::Enabled`, the commit must carry ≥ `threshold` signatures from the allowed validator set; threshold=0 is allowed without any signatures.
 9. Signatures are sorted by signer address before encoding.
 10. `AlreadyCommitted` or `NotNeeded` signature data is accepted when 2FA is disabled or threshold=0.
-22. At startup (main node only), `check_batch_verification_mismatch` warns when the node's configured `threshold` is **lower** than the on-chain threshold; the pipeline then enforces the effective threshold via `max(server.threshold, l1.threshold)`. No warning is issued when the server threshold is higher (safe direction).
 
 ### Batch verification transport (2FA wire protocol)
-26. The batch verification wire format is pinned to **v1** (`BATCH_VERIFICATION_WIRE_FORMAT_VERSION = 1`). The server's `ensure_supported_wire_format` function returns an error (not a panic) if the client announces any other version.
-27. `CommitBatchInfo` is **no longer the transport object** for batch verification. A dedicated `BatchVerificationCommitInfo` struct in `lib/batch_verification/src/wire_format/payload.rs` acts as the canonical transport boundary. It has `first_block_number: u64` and `last_block_number: u64` as required fields (not `Option`), and omits `number_of_layer2_txs` and `sl_chain_id`.
-28. **Protocol v31 requires a v2 wire transport upgrade before 2FA batch verification is safe.** The code includes a TODO comment in `lib/types/src/protocol/mod.rs:is_live()` stating that promoting v31 to live without first deploying v2 wire transport will make batch verification incomplete and compromise 2FA security.
+26. The batch verification wire format is **v2** (`BATCH_VERIFICATION_WIRE_FORMAT_VERSION = 2`). The server sends v2-encoded requests to ENs. The server's `BatchVerificationRequest::decode` accepts both v1 and v2 (selects on the version field); it panics on any other version.
+27. `CommitBatchInfo` is the transport object for batch verification. The v2 wire format ABI-encodes commit data using `IExecutor::CommitBatchInfoZKsyncOS` (v31 layout); v1 used `IExecutorV30::CommitBatchInfoZKsyncOS` (v30 layout). The field difference between v1 and v2 wire format is the inclusion of `sl_chain_id` and `first_block_number`/`last_block_number` in v2.
 
 ### SNARK public input
 11. For each batch `i`: `public_input_i = keccak(prev_state_commitment || state_commitment || commitment)`.
@@ -73,9 +71,9 @@ The L1 settling pipeline commits, proves, and executes ZKsync OS batches on Ethe
 16. `batchHash` stores `state_commitment`; `commitment` stores `batch_output_hash` (not a generic hash).
 
 ### Node role config requirements
-23. `L1SenderConfig::pubdata_mode` is `Option<PubdataMode>`. On the main node it **must** be set (the node panics with `.expect()` if absent). External nodes set it to `None` since they replay blocks and never produce them.
-24. `Config::external_price_api_client_config` is `Option<ExternalPriceApiClientConfig>`. On the main node it **must** be set. ENs may omit it.
-25. All pubdata-mode / DA-mode consistency checks (panic on mismatch) and the `check_batch_verification_mismatch` warning are guarded by `if node_role.is_main()` and are skipped on external nodes.
+23. `L1SenderConfig::pubdata_mode` is a required `PubdataMode` field — all nodes (main and external) must have it configured; there is no Optional wrapper.
+24. `Config::external_price_api_client_config` is a required `ExternalPriceApiClientConfig` field; all nodes must configure it.
+25. Certain operational checks (pubdata-mode / DA-mode consistency panic, L1 state fetch, 2FA wiring) are guarded by `if node_role.is_main()` and are skipped on external nodes, but the config fields themselves are always required.
 
 ### L1 transaction lifecycle
 17. Transactions are sent with 1 required confirmation and a 300-second timeout; a timeout causes a crash-and-restart recovery.
@@ -90,7 +88,6 @@ The L1 settling pipeline commits, proves, and executes ZKsync OS batches on Ethe
 
 ## Important Edge Cases and Failure Modes
 
-- **Protocol v31 upgrade without v2 batch verification transport**: the `is_live()` function in `lib/types/src/protocol/mod.rs` includes a TODO that explicitly blocks v31 promotion until v2 wire transport is deployed. If ignored, 2FA batch verification will fail for all ENs running v31.
 - **Batch already committed on L1** (e.g., after a restart): `GaplessCommitter` emits `Passthrough` instead of `SendToL1`; the L1 sender must drain all passthrough commands before switching to normal mode.
 - **Protocol version mismatch**: `encode_commit_batch_data` panics on unsupported `protocol_version_minor` (currently only 29, 30, 31 are supported; 32 is handled in execute but not in commit calldata).
 - **Unsupported execution version in prove**: panics if execution version is not in {4, 5, 6}.
@@ -99,8 +96,7 @@ The L1 settling pipeline commits, proves, and executes ZKsync OS batches on Ethe
 - **Threshold=0 with 2FA enabled**: allowed per code; edge case that bypasses signature requirement.
 - **`last_block_timestamp` in `StoredBatchInfo`**: field is ignored in `PartialEq` (explicitly skipped); present in struct for wire-format compatibility but semantically unused.
 - **Multiple batches in one prove/execute tx**: `ProofCommand` and `ExecuteCommand` both support batch ranges; `CommitCommand` is always single-batch.
-- **`pubdata_mode` missing on main node**: if the operator omits `l1_sender_pubdata_mode` from config, the main node panics at startup. There is no longer a default value (previously defaulted to `Blobs`).
-- **EN with `pubdata_mode = None`**: `FeeProvider::calculate_pubdata_price` calls `.expect()` on `pubdata_mode`, but this function is only reached via `BlockCommand::Produce`. ENs only handle `BlockCommand::Replay`, so the panic is unreachable in practice.
+- **`pubdata_mode` missing**: `pubdata_mode` is required for all nodes; omitting it from config will cause a startup failure.
 
 ---
 
