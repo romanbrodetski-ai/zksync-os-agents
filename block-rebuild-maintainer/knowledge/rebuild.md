@@ -9,8 +9,9 @@ Core flow:
 - Startup chooses the earliest block that must be replayed to restore correctness.
 - `MainNodeCommandSource.run()` directly sends commands over the output channel (no intermediate `BoxStream`). It emits `Replay` commands up to `rebuild_from_block - 1`, then `Rebuild` commands for `[rebuild_from_block..=latest_record]`, then enters `run_loop` which produces `Produce` commands indefinitely.
 - `ProduceCommand` is a unit struct; `block_number`, `block_time`, and `max_transactions_in_block` are held inside `BlockContextProvider` and tracked via `next_block_number` (incremented in `on_block_executed`).
-- `BlockContextProvider` converts `Rebuild` into execution-ready commands.
+- `BlockContextProvider` converts `Rebuild` into execution-ready commands. On `Replay` commands it validates `next_block_number == record.block_context.block_number` (blocks must arrive in order).
 - After WAL replay and rebuilds, the main node pipeline is: `BlockExecutor → BlockCanonizer → BlockApplier`.
+- `MainNodeCommandSource.run_loop` uses `tokio::select!` to race between producing new blocks and receiving canonized replays via `replays_to_execute`. On the main node, receiving a replay in leader mode is an error ("Leader node received block produced by someone else").
 - `BlockCanonizer` holds `MAX_PRODUCED_QUEUE_SIZE = 2` in-flight produced/rebuild blocks before applying backpressure. `NoopCanonization`'s internal channel **must have capacity ≥ MAX_PRODUCED_QUEUE_SIZE** (currently 2) to avoid a deadlock where `propose(blockN).await` blocks with the channel full while `next_canonized()` is unreachable.
 
 Important invariants:
