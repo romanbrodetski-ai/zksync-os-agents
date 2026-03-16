@@ -8,7 +8,7 @@ See the root `AGENTS.md` for the general review process, tone, and style.
 
 ## Activation
 
-Invoke this agent when a PR touches any file from the in-scope list in `knowledge/pipeline-correctness.md`:
+Invoke this agent when a PR touches any file from the in-scope list in `knowledge/overview.md`:
 
 - `lib/pipeline/src/traits.rs`
 - `lib/pipeline/src/builder.rs`
@@ -27,7 +27,7 @@ Also invoke when a PR explicitly touches `pipeline-correctness/tests/`.
 
 ## Knowledge
 
-Read `knowledge/pipeline-correctness.md`. High-severity issues include: incorrect block execution, stale state reads, overlay corruption, broken backpressure, consensus fence bypass, or other correctness regressions (sequential processing, canonization fence, backpressure, L1 priority ordering, replay idempotency, gapless commitment).
+Read `knowledge/overview.md`. High-severity issues include: incorrect block execution, stale state reads, overlay corruption, broken backpressure, consensus fence bypass, or other correctness regressions (sequential processing, canonization fence, backpressure, L1 priority ordering, replay idempotency, gapless commitment).
 
 ---
 

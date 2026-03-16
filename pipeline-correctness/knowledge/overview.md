@@ -10,6 +10,42 @@ components. When a section references source files, read the current version of 
 
 ---
 
+## 0. Scope
+
+### What this agent owns
+
+Pipeline execution correctness: the path from `BlockCommand` entering the Sequencer
+through persistence of block results. This includes command generation (CommandSource),
+block execution, state persistence ordering, backpressure between pipeline stages,
+replay idempotency, and the `OverriddenStateView` preimage injection mechanism.
+
+### Definitely in scope
+
+- `lib/pipeline/src/traits.rs`, `lib/pipeline/src/builder.rs` — pipeline framework
+- `lib/sequencer/src/execution/mod.rs`, `block_executor.rs`, `block_context_provider.rs` — sequencer
+- `lib/storage_api/src/state_override_view.rs`, `state.rs`, `replay.rs` — storage traits
+- `node/bin/src/command_source.rs`, `node/bin/src/lib.rs` (pipeline wiring)
+
+### Probably out of scope
+
+- TreeManager internals (Merkle tree updates) — touched only at the boundary
+- Batcher / batch commitment logic beyond gapless ordering invariant
+- L1Sender, FriProving, SnarkProving — downstream pipeline stages
+- Mempool internals beyond the `best_transactions_stream()` ordering contract
+- RPC / API layer
+- Prover input generation
+
+### Ambiguities and suspicious areas
+
+- The three-store write path (WriteReplay → WriteState → WriteRepository) is not atomic.
+  Crash recovery relies on WAL replay filling gaps, but no test currently exercises this.
+- `override_allowed` semantics: only Rebuild and external node should set this, but the
+  enforcement is spread across multiple call sites with no single guard.
+- `OUTPUT_BUFFER_SIZE = 0` is invalid (tokio panics), but the pipeline builder doesn't
+  validate this — a typo in a new component would cause a runtime panic.
+
+---
+
 ## 1. Pipeline Architecture Overview
 
 The server processes blocks through a linear chain of `PipelineComponent` stages connected
