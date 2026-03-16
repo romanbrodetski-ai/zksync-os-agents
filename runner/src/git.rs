@@ -46,13 +46,13 @@ pub fn resolve_ref(submodule_path: &Path, git_ref: &str) -> Result<String> {
         .with_context(|| format!("could not resolve ref '{git_ref}'"))
 }
 
-/// Returns (base_sha, head_sha) for a PR in matter-labs/zksync-os-server.
-pub fn pr_shas(pr_number: u64) -> Result<(String, String)> {
+/// Returns (base_sha, head_sha) for a PR in `repo` (e.g. "matter-labs/zksync-os-server").
+pub fn pr_shas(repo: &str, pr_number: u64) -> Result<(String, String)> {
     let out = std::process::Command::new("gh")
         .args([
             "pr", "view",
             &pr_number.to_string(),
-            "--repo", "matter-labs/zksync-os-server",
+            "--repo", repo,
             "--json", "baseRefOid,headRefOid",
             "--jq", "[.baseRefOid, .headRefOid] | @tsv",
         ])

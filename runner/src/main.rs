@@ -1,4 +1,5 @@
 mod claude;
+mod gh;
 mod git;
 mod prompts;
 
@@ -14,6 +15,9 @@ struct Cli {
 
     #[arg(long, default_value = "claude")]
     ai: Ai,
+
+    #[arg(long, default_value = "claude-opus-4-6")]
+    model: String,
 
     #[command(subcommand)]
     command: Command,
@@ -48,8 +52,8 @@ enum Ai {
 enum Command {
     /// Review a PR. The PR's base branch must already be the agent's current submodule SHA.
     ReviewPr {
-        /// GitHub PR number (in matter-labs/zksync-os-server)
-        pr_number: u64,
+        /// Full GitHub PR URL (e.g. https://github.com/matter-labs/zksync-os-server/pull/123)
+        pr_url: String,
     },
     /// Update the agent to a specific server commit: branch, tag, or SHA.
     Update {
@@ -69,6 +73,7 @@ fn main() -> Result<()> {
     let repo_root = find_repo_root()?;
     let agent_path = repo_root.join(cli.agent.dir());
     let submodule_path = agent_path.join("zksync-os-server");
+    let bot_name = cli.agent.dir();
 
     git::ensure_submodule_initialized(&repo_root, &submodule_path)?;
     git::check_submodule_clean(&submodule_path)
@@ -77,8 +82,9 @@ fn main() -> Result<()> {
     let current = git::current_sha(&submodule_path)?;
 
     match cli.command {
-        Command::ReviewPr { pr_number } => {
-            let (base, head) = git::pr_shas(pr_number)?;
+        Command::ReviewPr { pr_url } => {
+            let (server_repo, pr_number) = parse_pr_url(&pr_url)?;
+            let (base, head) = git::pr_shas(&server_repo, pr_number)?;
             if current != base {
                 anyhow::bail!(
                     "submodule is at {current} but PR #{pr_number} base is {base} — \
@@ -86,11 +92,20 @@ fn main() -> Result<()> {
                 );
             }
             git::print_diff_summary(&submodule_path, &base, &head)?;
-            claude::exec(
+
+            let start = std::time::Instant::now();
+            claude::run(
                 &agent_path,
                 &prompts::system_ctx(),
                 &prompts::agent_prompt(&base, &head),
-            );
+                &cli.model,
+            )?;
+            let duration = start.elapsed();
+
+            let server_pr = gh::find_server_pr_url(&server_repo, &head);
+            if let Some(agent_pr) = gh::latest_open_pr_url(&agent_path)? {
+                gh::prepend_pr_metadata(&agent_pr, bot_name, &cli.model, duration, server_pr)?;
+            }
         }
         Command::Update { target } => {
             let new = git::resolve_ref(&submodule_path, &target)?;
@@ -99,13 +114,43 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             git::print_diff_summary(&submodule_path, &current, &new)?;
-            claude::exec(
+
+            let start = std::time::Instant::now();
+            claude::run(
                 &agent_path,
-                "",
+                &prompts::system_ctx(),
                 &prompts::agent_prompt(&current, &new),
-            );
+                &cli.model,
+            )?;
+            let duration = start.elapsed();
+
+            let server_pr = gh::find_server_pr_url("matter-labs/zksync-os-server", &new);
+            if let Some(agent_pr) = gh::latest_open_pr_url(&agent_path)? {
+                gh::prepend_pr_metadata(&agent_pr, bot_name, &cli.model, duration, server_pr)?;
+            }
         }
     }
+
+    Ok(())
+}
+
+/// Parses a GitHub PR URL into (repo, pr_number).
+/// Accepts https://github.com/{owner}/{repo}/pull/{number}.
+fn parse_pr_url(url: &str) -> Result<(String, u64)> {
+    let path = url
+        .strip_prefix("https://github.com/")
+        .with_context(|| format!("PR URL must start with https://github.com/ — got: {url}"))?;
+
+    let parts: Vec<&str> = path.splitn(4, '/').collect();
+    if parts.len() < 4 || parts[2] != "pull" {
+        anyhow::bail!("invalid GitHub PR URL: {url}");
+    }
+
+    let repo = format!("{}/{}", parts[0], parts[1]);
+    let number: u64 = parts[3]
+        .parse()
+        .with_context(|| format!("invalid PR number in URL: {url}"))?;
+    Ok((repo, number))
 }
 
 /// Walks up from CWD until it finds a directory containing `.git`.
