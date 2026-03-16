@@ -1,12 +1,12 @@
 pub mod mocks;
 
 #[cfg(test)]
-mod canonization;
+mod backpressure;
 #[cfg(test)]
 mod pipeline_flow;
 #[cfg(test)]
 mod replay_storage;
 #[cfg(test)]
-mod backpressure;
+mod sequencer;
 #[cfg(test)]
-mod overlay;
+mod state_override;

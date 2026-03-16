@@ -9,45 +9,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use zksync_os_pipeline::{PeekableReceiver, PipelineComponent};
-use zksync_os_sequencer::execution::block_applier::BlockApplier;
-use zksync_os_sequencer::execution::block_canonizer::{BlockCanonizer, NoopCanonization};
-
-/// Verify BlockCanonizer's OUTPUT_BUFFER_SIZE is 2.
-/// This is important because it controls how far ahead persistence can get
-/// before the canonizer blocks. Too large = no backpressure. Too small = unnecessary stalling.
-///
-/// If this test fails, someone changed the buffer size. Check if the change
-/// was intentional and update the knowledge doc.
-#[test]
-fn canonizer_output_buffer_size_is_2() {
-    assert_eq!(
-        BlockCanonizer::<NoopCanonization>::OUTPUT_BUFFER_SIZE,
-        2,
-        "BlockCanonizer OUTPUT_BUFFER_SIZE changed from expected value of 2. \
-        This affects backpressure for the entire pipeline. \
-        Was this intentional? Update knowledge doc if so."
-    );
-}
-
-/// Verify BlockApplier's OUTPUT_BUFFER_SIZE is 5.
-/// BlockApplier does persistence which is fast, so a larger buffer is appropriate.
-#[test]
-fn applier_output_buffer_size_is_5() {
-    type TestApplier = BlockApplier<
-        crate::mocks::MockWriteState,
-        crate::mocks::MockReplayStorage,
-        crate::mocks::MockRepository,
-    >;
-    assert_eq!(
-        TestApplier::OUTPUT_BUFFER_SIZE,
-        5,
-        "BlockApplier OUTPUT_BUFFER_SIZE changed from expected value of 5. \
-        Was this intentional?"
-    );
-}
 
 /// A slow consumer should cause a fast producer to block when the buffer fills.
 /// This verifies the fundamental backpressure mechanism.

@@ -12,11 +12,9 @@ Invoke this agent when a PR touches any file from the in-scope list in `knowledg
 
 - `lib/pipeline/src/traits.rs`
 - `lib/pipeline/src/builder.rs`
+- `lib/sequencer/src/execution/mod.rs`
 - `lib/sequencer/src/execution/block_executor.rs`
-- `lib/sequencer/src/execution/block_applier.rs`
-- `lib/sequencer/src/execution/block_canonizer.rs`
-- `lib/sequencer/src/consensus/`
-- `lib/storage_api/src/overlay_buffer.rs`
+- `lib/sequencer/src/execution/block_context_provider.rs`
 - `lib/storage_api/src/state_override_view.rs`
 - `lib/storage_api/src/state.rs`
 - `lib/storage_api/src/replay.rs`
@@ -44,11 +42,11 @@ cargo nextest run -p pipeline_correctness_tests
 Or run specific modules:
 
 ```sh
-cargo nextest run -p pipeline_correctness_tests --test-threads 1 -- overlay
-cargo nextest run -p pipeline_correctness_tests --test-threads 1 -- canonization
+cargo nextest run -p pipeline_correctness_tests --test-threads 1 -- sequencer
 cargo nextest run -p pipeline_correctness_tests --test-threads 1 -- backpressure
 cargo nextest run -p pipeline_correctness_tests --test-threads 1 -- pipeline_flow
 cargo nextest run -p pipeline_correctness_tests --test-threads 1 -- replay_storage
+cargo nextest run -p pipeline_correctness_tests --test-threads 1 -- state_override
 ```
 
 If tests fail on the PR branch but pass on base, the PR likely breaks an invariant. If tests fail on both, the test suite has drifted — investigate and fix.
