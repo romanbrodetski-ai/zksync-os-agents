@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     let agent_path = repo_root.join(cli.agent.dir());
     let submodule_path = agent_path.join("zksync-os-server");
 
-    git::check_submodule_initialized(&submodule_path)?;
+    git::ensure_submodule_initialized(&repo_root, &submodule_path)?;
     git::check_submodule_clean(&submodule_path)
         .context("submodule must be clean before running an agent")?;
 

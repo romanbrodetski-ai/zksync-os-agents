@@ -1,15 +1,20 @@
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
-/// Fails if the submodule has not been initialized (i.e. `git submodule update --init` not run).
-pub fn check_submodule_initialized(submodule_path: &Path) -> Result<()> {
-    // An initialized submodule has a .git file (not directory) pointing to the parent's gitdir.
+/// Initializes the submodule if it hasn't been initialized yet.
+pub fn ensure_submodule_initialized(repo_root: &Path, submodule_path: &Path) -> Result<()> {
     if !submodule_path.join(".git").exists() {
-        bail!(
-            "submodule {} is not initialized — run `git submodule update --init {}`",
-            submodule_path.display(),
-            submodule_path.display(),
-        );
+        println!("Initializing submodule {}…", submodule_path.display());
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(["submodule", "update", "--init", "--"])
+            .arg(submodule_path)
+            .status()
+            .context("failed to run git submodule update --init")?;
+        if !status.success() {
+            bail!("failed to initialize submodule {}", submodule_path.display());
+        }
     }
     Ok(())
 }
