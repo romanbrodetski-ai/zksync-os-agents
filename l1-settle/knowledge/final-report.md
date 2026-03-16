@@ -1,10 +1,10 @@
 # Final Report — L1 Settling Agent (agents/l1-settle)
 
-**Date**: 2026-03-15
+**Date**: 2026-03-16
 **Crate**: `zksync_os_l1_settle_tests` (`agents/l1-settle/tests/`)
 **Unit tests passing**: 22 / 22
 **Integration tests**: compile-clean, run against Anvil on `cargo nextest run -p zksync_os_l1_settle_tests`
-**Server submodule**: b68775b670ad5a67d54ff1f82b34d08465318986 (bumped from 86563a6995934fcac041a22e3de22b66a306089c)
+**Server submodule**: 53c09b542b83c9d32d46f02a5a18c74f828410f9 (bumped from b68775b670ad5a67d54ff1f82b34d08465318986)
 
 ---
 
