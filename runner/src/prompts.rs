@@ -15,6 +15,10 @@ The PR description must include:\n\
 - A list of any issues or comments found in the diff\n\
 - Anything else you consider relevant for a human reviewer\n\
 \n\
+After opening the PR, check the submodule back out to the SHA it was at when \
+you started (the `from_sha` passed in the prompt), so the working tree is \
+restored to its original state.\n\
+\n\
 Do not post anything to GitHub other than this one PR.\
 ";
 
