@@ -1,4 +1,5 @@
 mod claude;
+mod codex;
 mod gh;
 mod git;
 mod prompts;
@@ -65,11 +66,6 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.ai {
-        Ai::Codex => todo!("Codex support not yet implemented"),
-        Ai::Claude => {}
-    }
-
     let repo_root = find_repo_root()?;
     let agent_path = repo_root.join(cli.agent.dir());
     let submodule_path = agent_path.join("zksync-os-server");
@@ -94,12 +90,7 @@ fn main() -> Result<()> {
             git::print_diff_summary(&submodule_path, &base, &head)?;
 
             let start = std::time::Instant::now();
-            claude::run(
-                &agent_path,
-                &prompts::system_ctx(),
-                &prompts::agent_prompt(&base, &head),
-                &cli.model,
-            )?;
+            run_ai(&cli.ai, &agent_path, &prompts::system_ctx(), &prompts::agent_prompt(&base, &head), &cli.model)?;
             let duration = start.elapsed();
 
             let server_pr = gh::find_server_pr_url(&server_repo, &head);
@@ -132,6 +123,13 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_ai(ai: &Ai, agent_dir: &std::path::Path, system_ctx: &str, prompt: &str, model: &str) -> Result<()> {
+    match ai {
+        Ai::Claude => claude::run(agent_dir, system_ctx, prompt, model),
+        Ai::Codex => codex::run(agent_dir, system_ctx, prompt, model),
+    }
 }
 
 /// Parses a GitHub PR URL into (repo, pr_number).
