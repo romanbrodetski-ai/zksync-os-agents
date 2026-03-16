@@ -154,6 +154,18 @@ then write tests that would catch realistic regressions.
 ";
 
 
+/// System context appended to the agent's system prompt.
+pub fn system_ctx() -> String {
+    format!(
+        "As a reference, see the prompt that is used for creating agents.\n\
+        While working on the PR, keep these principles in mind. If you see that some of them have degraded,\n\
+        You can make corresponding changes within the PR:\n\
+        ```\n\
+        {NEW_AGENT_PROMPT}\n\
+        ```"
+    )
+}
+
 /// Prompt for all agent invocations. The agent decides how best to do the work.
 pub fn agent_prompt(from_sha: &str, to_sha: &str) -> String {
     format!(
@@ -175,13 +187,6 @@ pub fn agent_prompt(from_sha: &str, to_sha: &str) -> String {
 
         {TONE}\
         {ISSUE_ISOLATION}\
-
-        As a reference, see the prompt that is used for creating agents.
-        While working on the PR, keep these principles in mind. If you see that some of them have degraded,
-        You can make corresponding changes within the PR:
-        ```
-        {NEW_AGENT_PROMPT}
-        ```
      "
     )
 }

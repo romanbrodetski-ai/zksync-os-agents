@@ -88,7 +88,7 @@ fn main() -> Result<()> {
             git::print_diff_summary(&submodule_path, &base, &head)?;
             claude::exec(
                 &agent_path,
-                "",
+                &prompts::system_ctx(),
                 &prompts::agent_prompt(&base, &head),
             );
         }
