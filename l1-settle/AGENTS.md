@@ -23,7 +23,7 @@ Also invoke when a PR explicitly touches `l1-settle/tests/`.
 
 ## Knowledge
 
-Read `knowledge/overview.md` (invariants, edge cases) and `knowledge/final-report.md` (mutation coverage). High-severity issues include: incorrect on-chain state, silent data corruption, transaction reverts, or security regressions (ordering, calldata encoding, 2FA, SNARK public input, StoredBatchInfo hash, L1 tx lifecycle).
+Read `knowledge/overview.md` (invariants, edge cases). High-severity issues include: incorrect on-chain state, silent data corruption, transaction reverts, or security regressions (ordering, calldata encoding, 2FA, SNARK public input, StoredBatchInfo hash, L1 tx lifecycle).
 
 Also check `knowledge/open-questions.md` — if the PR resolves an open question, remove or update the entry.
 

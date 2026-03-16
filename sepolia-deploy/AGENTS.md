@@ -20,7 +20,6 @@ Invoke this agent when:
 
 - `knowledge/overview.md` — deployment pipeline, gas costs, rollout UX issues, key invariants
 - `knowledge/test-plan.md` — test matrix for config generation, role verification, settlement
-- `knowledge/final-report.md` — latest deployment results and findings
 
 ---
 
