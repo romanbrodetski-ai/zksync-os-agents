@@ -280,6 +280,21 @@ When reviewing PRs that touch pipeline code, check for:
   latency. Consider whether the new stage needs to be in the critical path.
 - **Conditional components:** `pipe_opt()` and `pipe_if()` must preserve type compatibility
 
+### Config Optionality (Main Node vs External Node)
+
+Several pipeline-related configs are `Option` because External Nodes don't need them:
+
+- **`L1SenderConfig::pubdata_mode`** — `Option<PubdataMode>`. Only the Main Node uses this
+  (block production, batcher, prover input generator). Guarded by `.expect()` in main-node paths.
+  `FeeProvider` also holds `Option<PubdataMode>` and panics if `None` when producing blocks.
+- **`Config::external_price_api_client_config`** — `Option<ExternalPriceApiClientConfig>`.
+  Only the Main Node runs the base token price updater.
+
+**Failure mode:** If a new main-node-only code path accesses an optional config without
+guarding with `.expect()` or `if node_role.is_main()`, the External Node will panic at
+runtime. Conversely, if a previously optional config becomes required for EN, the `Option`
+must be removed or a new guard added.
+
 ---
 
 ## 8. File Reference Map
@@ -302,3 +317,5 @@ Quick reference for the most important files in the pipeline:
 | State override view | `lib/storage_api/src/state_override_view.rs` | OverriddenStateView for preimages |
 | Tree manager | `node/bin/src/tree_manager.rs` | Merkle tree updates |
 | Batcher | `node/bin/src/batcher/mod.rs` | Batch boundary logic |
+| Fee provider | `lib/sequencer/src/execution/fee_provider.rs` | Pubdata pricing, Option<PubdataMode> |
+| Node config | `node/bin/src/config/mod.rs` | Config structs, Option fields for EN |
