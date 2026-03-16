@@ -22,9 +22,9 @@ pub fn current_sha(submodule_path: &Path) -> Result<String> {
 /// Fetches origin and resolves a git ref (branch, tag, or SHA) to a concrete SHA.
 pub fn resolve_ref(submodule_path: &Path, git_ref: &str) -> Result<String> {
     git_status(submodule_path, &["fetch", "origin"])?;
-    // Try as-is first (full SHA, tag, local ref), then as a remote branch name.
-    git(submodule_path, &["rev-parse", git_ref])
-        .or_else(|_| git(submodule_path, &["rev-parse", &format!("origin/{git_ref}")]))
+    // Try as a remote branch first (picks up the freshly-fetched ref), then as-is (SHA, tag).
+    git(submodule_path, &["rev-parse", &format!("origin/{git_ref}")])
+        .or_else(|_| git(submodule_path, &["rev-parse", git_ref]))
         .with_context(|| format!("could not resolve ref '{git_ref}'"))
 }
 
