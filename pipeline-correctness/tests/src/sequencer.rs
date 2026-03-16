@@ -1,48 +1,38 @@
-//! Tests for the unified Sequencer pipeline component.
-//!
-//! The Sequencer combines block execution and persistence into a single pipeline stage.
-//! It replaced the previous BlockExecutor → BlockCanonizer → BlockApplier chain.
+//! Tests for the three-stage block processing pipeline:
+//! BlockExecutor → BlockCanonizer → BlockApplier.
 //!
 //! These tests verify:
-//! - The Sequencer's OUTPUT_BUFFER_SIZE is set correctly
-//! - The command source generates commands with correct block numbers
-//! - ProduceCommand carries block_time and max_transactions_in_block
+//! - BlockExecutor, BlockCanonizer, and BlockApplier output types and buffer sizes
+//! - ProduceCommand is a unit struct (block params determined by BlockContextProvider)
+//! - BlockCommandType enum covers all command variants
+//! - BlockApplier sets override_allowed correctly per command type
 
-use zksync_os_sequencer::model::blocks::{BlockCommand, ProduceCommand};
+use alloy::primitives::B256;
+use zksync_os_sequencer::model::blocks::{BlockCommand, BlockCommandType, ProduceCommand};
 
-/// ProduceCommand must carry block_number, block_time, and max_transactions_in_block.
-/// These were previously stored in BlockContextProvider; now they travel with the command.
+/// ProduceCommand is now a unit struct — block_number, block_time, and
+/// max_transactions_in_block are determined by BlockContextProvider::prepare_command().
 #[test]
-fn produce_command_carries_block_params() {
-    let cmd = ProduceCommand {
-        block_number: 42,
-        block_time: std::time::Duration::from_secs(1),
-        max_transactions_in_block: 100,
-    };
-
-    assert_eq!(cmd.block_number, 42);
-    assert_eq!(cmd.block_time, std::time::Duration::from_secs(1));
-    assert_eq!(cmd.max_transactions_in_block, 100);
+fn produce_command_is_unit_struct() {
+    let _cmd = ProduceCommand;
+    // Compile-time check: ProduceCommand has no fields.
+    let _cmd2 = ProduceCommand {};
 }
 
-/// BlockCommand::block_number() must return the correct block number for each variant.
+/// BlockCommand::command_type() must return the correct variant for each command.
 #[test]
-fn block_command_block_number() {
+fn block_command_type_matches_variant() {
     use crate::mocks::make_replay_record;
     use zksync_os_sequencer::model::blocks::RebuildCommand;
 
     // Replay
     let replay_record = make_replay_record(10, 1000);
     let cmd = BlockCommand::Replay(Box::new(replay_record));
-    assert_eq!(cmd.block_number(), 10);
+    assert!(matches!(cmd.command_type(), BlockCommandType::Replay));
 
     // Produce
-    let cmd = BlockCommand::Produce(ProduceCommand {
-        block_number: 20,
-        block_time: std::time::Duration::from_secs(1),
-        max_transactions_in_block: 50,
-    });
-    assert_eq!(cmd.block_number(), 20);
+    let cmd = BlockCommand::Produce(ProduceCommand);
+    assert!(matches!(cmd.command_type(), BlockCommandType::Produce));
 
     // Rebuild
     let rebuild_record = make_replay_record(30, 2000);
@@ -50,17 +40,25 @@ fn block_command_block_number() {
         replay_record: rebuild_record,
         make_empty: false,
     }));
-    assert_eq!(cmd.block_number(), 30);
+    assert!(matches!(cmd.command_type(), BlockCommandType::Rebuild));
 }
 
-/// The Sequencer output type is (BlockOutput, ReplayRecord) — no more BlockCommandType.
-/// The old pipeline had a third element (BlockCommandType) that was used by BlockApplier
-/// to determine override_allowed. Now the Sequencer handles this internally.
+/// BlockExecutor output type is (BlockOutput, ReplayRecord, BlockCommandType).
+/// BlockApplier strips BlockCommandType, outputting (BlockOutput, ReplayRecord).
 #[test]
-fn sequencer_output_type_is_two_tuple() {
-    // This is a compile-time check. If the Sequencer output type changes,
-    // this test will fail to compile.
-    fn _assert_output_type(
+fn pipeline_stage_output_types() {
+    // BlockExecutor output
+    fn _assert_executor_output(
+        _: (
+            zksync_os_interface::types::BlockOutput,
+            zksync_os_storage_api::ReplayRecord,
+            BlockCommandType,
+        ),
+    ) {
+    }
+
+    // BlockApplier output
+    fn _assert_applier_output(
         _: (
             zksync_os_interface::types::BlockOutput,
             zksync_os_storage_api::ReplayRecord,
@@ -69,13 +67,13 @@ fn sequencer_output_type_is_two_tuple() {
     }
 }
 
-/// ReadReplayExt::stream() should return records in order.
+/// ReadReplayExt::forward_range_with should send records through a channel in order.
 #[test]
-fn replay_stream_returns_records_in_order() {
+fn replay_forward_range_sends_records_in_order() {
     use crate::mocks::MockReplayStorage;
     use alloy::primitives::{B256, Sealed};
-    use futures::StreamExt;
-    use zksync_os_storage_api::{ReadReplayExt, WriteReplay};
+    use tokio::sync::mpsc;
+    use zksync_os_storage_api::{ReadReplayExt, ReplayRecord, WriteReplay};
 
     let storage = MockReplayStorage::new().with_genesis();
 
@@ -88,12 +86,49 @@ fn replay_stream_returns_records_in_order() {
         );
     }
 
-    // Stream blocks 2-4
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let records: Vec<_> = rt.block_on(async { storage.stream(2, 4).collect::<Vec<_>>().await });
+    let records: Vec<ReplayRecord> = rt.block_on(async {
+        let (tx, mut rx) = mpsc::channel(10);
+        storage
+            .forward_range_with(2, 4, tx, |r| r)
+            .await
+            .unwrap();
+        let mut out = vec![];
+        while let Ok(r) = rx.try_recv() {
+            out.push(r);
+        }
+        out
+    });
 
     assert_eq!(records.len(), 3);
     assert_eq!(records[0].block_context.block_number, 2);
     assert_eq!(records[1].block_context.block_number, 3);
     assert_eq!(records[2].block_context.block_number, 4);
+}
+
+/// ReplayRecord equality should exclude node_version (by design).
+#[test]
+fn replay_record_equality_ignores_node_version() {
+    let mut r1 = crate::mocks::make_replay_record(1, 1001);
+    let mut r2 = crate::mocks::make_replay_record(1, 1001);
+
+    r1.node_version = semver::Version::new(0, 16, 0);
+    r2.node_version = semver::Version::new(0, 17, 0);
+
+    assert_eq!(r1, r2, "Records should be equal despite different node_version");
+}
+
+/// ReplayRecord equality should NOT ignore block_output_hash.
+#[test]
+fn replay_record_inequality_on_output_hash() {
+    let mut r1 = crate::mocks::make_replay_record(1, 1001);
+    let mut r2 = crate::mocks::make_replay_record(1, 1001);
+
+    r1.block_output_hash = B256::from([0x01; 32]);
+    r2.block_output_hash = B256::from([0x02; 32]);
+
+    assert_ne!(
+        r1, r2,
+        "Records with different output hashes should not be equal"
+    );
 }

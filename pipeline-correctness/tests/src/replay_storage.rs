@@ -184,29 +184,3 @@ fn write_log_tracks_operations() {
     assert_eq!(log[2], (3, false));
     assert_eq!(log[3], (3, true));
 }
-
-/// ReplayRecord equality should exclude node_version (by design).
-/// Two records that differ only in node_version should be equal.
-#[test]
-fn replay_record_equality_ignores_node_version() {
-    let mut r1 = make_replay_record(1, 1001);
-    let mut r2 = make_replay_record(1, 1001);
-
-    r1.node_version = semver::Version::new(0, 16, 0);
-    r2.node_version = semver::Version::new(0, 17, 0);
-
-    assert_eq!(r1, r2, "Records should be equal despite different node_version");
-}
-
-/// ReplayRecord equality should NOT ignore block_output_hash.
-/// Two records with different output hashes represent different blocks.
-#[test]
-fn replay_record_inequality_on_output_hash() {
-    let mut r1 = make_replay_record(1, 1001);
-    let mut r2 = make_replay_record(1, 1001);
-
-    r1.block_output_hash = B256::from([0x01; 32]);
-    r2.block_output_hash = B256::from([0x02; 32]);
-
-    assert_ne!(r1, r2, "Records with different output hashes should not be equal");
-}
