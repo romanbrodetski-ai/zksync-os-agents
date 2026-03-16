@@ -56,6 +56,7 @@ pub fn pr_shas(pr_number: u64) -> Result<(String, String)> {
 /// commits on each side (with dates) and per-file change stats.
 pub fn print_diff_summary(submodule_path: &Path, from: &str, to: &str) -> Result<()> {
     // Symmetric log: commits in from but not to (<) and in to but not from (>).
+    println!("\nUpdating {} → {}", &from[..from.len().min(12)], &to[..to.len().min(12)]);
     println!("\n=== Commits ===");
     let log = git(
         submodule_path,
