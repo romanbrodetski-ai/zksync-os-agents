@@ -107,12 +107,7 @@ fn main() -> Result<()> {
             git::print_diff_summary(&submodule_path, &current, &new)?;
 
             let start = std::time::Instant::now();
-            claude::run(
-                &agent_path,
-                &prompts::system_ctx(),
-                &prompts::agent_prompt(&current, &new),
-                &cli.model,
-            )?;
+            run_ai(&cli.ai, &agent_path, &prompts::system_ctx(), &prompts::agent_prompt(&current, &new), &cli.model)?;
             let duration = start.elapsed();
 
             let server_pr = gh::find_server_pr_url("matter-labs/zksync-os-server", &new);
