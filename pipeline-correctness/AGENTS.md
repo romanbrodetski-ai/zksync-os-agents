@@ -14,8 +14,12 @@ Invoke this agent when a PR touches any file from the in-scope list in `knowledg
 - `lib/pipeline/src/builder.rs`
 - `lib/sequencer/src/execution/mod.rs`
 - `lib/sequencer/src/execution/block_executor.rs`
+- `lib/sequencer/src/execution/block_canonizer.rs`
+- `lib/sequencer/src/execution/block_applier.rs`
+- `lib/sequencer/src/execution/execute_block_in_vm.rs`
 - `lib/sequencer/src/execution/block_context_provider.rs`
 - `lib/storage_api/src/state_override_view.rs`
+- `lib/storage_api/src/overlay_buffer.rs`
 - `lib/storage_api/src/state.rs`
 - `lib/storage_api/src/replay.rs`
 - `node/bin/src/command_source.rs`

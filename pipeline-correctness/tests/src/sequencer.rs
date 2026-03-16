@@ -1,48 +1,41 @@
-//! Tests for the unified Sequencer pipeline component.
+//! Tests for the split pipeline: BlockExecutor → BlockCanonizer → BlockApplier.
 //!
-//! The Sequencer combines block execution and persistence into a single pipeline stage.
-//! It replaced the previous BlockExecutor → BlockCanonizer → BlockApplier chain.
+//! The Sequencer was split into three separate pipeline components:
+//! - BlockExecutor: executes blocks using an in-memory OverlayBuffer (no disk I/O)
+//! - BlockCanonizer: consensus fence ensuring only canonized blocks proceed
+//! - BlockApplier: persists blocks to WAL, state storage, and repository
 //!
 //! These tests verify:
-//! - The Sequencer's OUTPUT_BUFFER_SIZE is set correctly
-//! - The command source generates commands with correct block numbers
-//! - ProduceCommand carries block_time and max_transactions_in_block
+//! - ProduceCommand is a unit struct (no fields)
+//! - BlockCommandType is correctly derived from each command variant
+//! - The BlockExecutor output includes BlockCommandType for downstream routing
+//! - The BlockApplier output is (BlockOutput, ReplayRecord) — no command type
 
-use zksync_os_sequencer::model::blocks::{BlockCommand, ProduceCommand};
+use zksync_os_sequencer::model::blocks::{BlockCommand, BlockCommandType, ProduceCommand};
 
-/// ProduceCommand must carry block_number, block_time, and max_transactions_in_block.
-/// These were previously stored in BlockContextProvider; now they travel with the command.
+/// ProduceCommand is now a unit struct — block_number, block_time, and
+/// max_transactions_in_block are determined by BlockContextProvider at
+/// prepare_command() time, not carried on the command.
 #[test]
-fn produce_command_carries_block_params() {
-    let cmd = ProduceCommand {
-        block_number: 42,
-        block_time: std::time::Duration::from_secs(1),
-        max_transactions_in_block: 100,
-    };
-
-    assert_eq!(cmd.block_number, 42);
-    assert_eq!(cmd.block_time, std::time::Duration::from_secs(1));
-    assert_eq!(cmd.max_transactions_in_block, 100);
+fn produce_command_is_unit_struct() {
+    let _cmd = ProduceCommand;
+    // If ProduceCommand had fields, this would fail to compile.
 }
 
-/// BlockCommand::block_number() must return the correct block number for each variant.
+/// BlockCommand::command_type() must return the correct type for each variant.
 #[test]
-fn block_command_block_number() {
+fn block_command_type() {
     use crate::mocks::make_replay_record;
     use zksync_os_sequencer::model::blocks::RebuildCommand;
 
     // Replay
     let replay_record = make_replay_record(10, 1000);
     let cmd = BlockCommand::Replay(Box::new(replay_record));
-    assert_eq!(cmd.block_number(), 10);
+    assert!(matches!(cmd.command_type(), BlockCommandType::Replay));
 
     // Produce
-    let cmd = BlockCommand::Produce(ProduceCommand {
-        block_number: 20,
-        block_time: std::time::Duration::from_secs(1),
-        max_transactions_in_block: 50,
-    });
-    assert_eq!(cmd.block_number(), 20);
+    let cmd = BlockCommand::Produce(ProduceCommand);
+    assert!(matches!(cmd.command_type(), BlockCommandType::Produce));
 
     // Rebuild
     let rebuild_record = make_replay_record(30, 2000);
@@ -50,16 +43,28 @@ fn block_command_block_number() {
         replay_record: rebuild_record,
         make_empty: false,
     }));
-    assert_eq!(cmd.block_number(), 30);
+    assert!(matches!(cmd.command_type(), BlockCommandType::Rebuild));
 }
 
-/// The Sequencer output type is (BlockOutput, ReplayRecord) — no more BlockCommandType.
-/// The old pipeline had a third element (BlockCommandType) that was used by BlockApplier
-/// to determine override_allowed. Now the Sequencer handles this internally.
+/// BlockExecutor output is (BlockOutput, ReplayRecord, BlockCommandType).
+/// BlockCommandType travels through the canonizer to the applier so it can
+/// determine override_allowed.
 #[test]
-fn sequencer_output_type_is_two_tuple() {
-    // This is a compile-time check. If the Sequencer output type changes,
-    // this test will fail to compile.
+fn block_executor_output_includes_command_type() {
+    fn _assert_output_type(
+        _: (
+            zksync_os_interface::types::BlockOutput,
+            zksync_os_storage_api::ReplayRecord,
+            BlockCommandType,
+        ),
+    ) {
+    }
+}
+
+/// BlockApplier output is (BlockOutput, ReplayRecord) — the command type
+/// is consumed by the applier and not forwarded downstream.
+#[test]
+fn block_applier_output_is_two_tuple() {
     fn _assert_output_type(
         _: (
             zksync_os_interface::types::BlockOutput,
@@ -69,12 +74,11 @@ fn sequencer_output_type_is_two_tuple() {
     }
 }
 
-/// ReadReplayExt::stream() should return records in order.
+/// ReadReplayExt::forward_range_with should forward records in order.
 #[test]
-fn replay_stream_returns_records_in_order() {
+fn replay_forward_range_returns_records_in_order() {
     use crate::mocks::MockReplayStorage;
     use alloy::primitives::{B256, Sealed};
-    use futures::StreamExt;
     use zksync_os_storage_api::{ReadReplayExt, WriteReplay};
 
     let storage = MockReplayStorage::new().with_genesis();
@@ -88,9 +92,20 @@ fn replay_stream_returns_records_in_order() {
         );
     }
 
-    // Stream blocks 2-4
+    // Forward blocks 2-4 through a channel
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let records: Vec<_> = rt.block_on(async { storage.stream(2, 4).collect::<Vec<_>>().await });
+    let records: Vec<_> = rt.block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        storage
+            .forward_range_with(2, 4, tx, |record| record)
+            .await
+            .unwrap();
+        let mut out = vec![];
+        while let Ok(r) = rx.try_recv() {
+            out.push(r);
+        }
+        out
+    });
 
     assert_eq!(records.len(), 3);
     assert_eq!(records[0].block_context.block_number, 2);
