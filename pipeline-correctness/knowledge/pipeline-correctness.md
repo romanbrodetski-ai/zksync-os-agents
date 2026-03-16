@@ -168,15 +168,27 @@ Understanding the three command types is critical for reviewing pipeline changes
 ### BlockCommand::Replay
 - Two sources: WAL replay on startup, or canonized blocks from other nodes
 - Transactions come from the `ReplayRecord` itself (predetermined)
-- Uses `SealPolicy::UntilExhausted` — must execute all txs in the record
+- Uses `SealPolicy::UntilExhausted { allowed_to_finish_early: false }` — MUST execute all txs
 - Uses `InvalidTxPolicy::Abort` — any invalid tx is a fatal error (deterministic replay)
+
+**Invariant:** `execute_block()` enforces that a Replay block sealed for any reason other
+than `TxStreamExhausted` is a fatal error. Early sealing (e.g., GasLimit, Timeout, UpgradeTx)
+during replay means the execution diverged from the canonical record — this panics the
+Sequencer and requires operator intervention.
 
 ### BlockCommand::Rebuild
 - Used to rollback to an earlier state and re-execute
-- Like Produce but with `override_allowed = true` in `Sequencer`
+- Like Replay but with `override_allowed = true` in `Sequencer`
+- Uses `SealPolicy::UntilExhausted { allowed_to_finish_early: true }` — may seal early
 
 **Key distinction:** A Replay that fails is a critical error (the canonical chain is
-inconsistent). A Produce that fails can be retried with different transactions.
+inconsistent). A Produce that fails can be retried with different transactions. A Rebuild
+is intentional re-execution and may produce a different result (e.g., when making a block empty).
+
+**Block number ordering:** `BlockContextProvider` does NOT validate that Replay commands
+arrive in block-number order. Ordering is guaranteed by the upstream: `command_source()`
+generates sequential numbers, and SPSC pipeline channels enforce FIFO delivery. The only
+consistency check in `BlockContextProvider` is `previous_block_timestamp` matching.
 
 **Where defined:** `lib/sequencer/src/model/blocks.rs`
 

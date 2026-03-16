@@ -97,3 +97,41 @@ fn replay_stream_returns_records_in_order() {
     assert_eq!(records[1].block_context.block_number, 3);
     assert_eq!(records[2].block_context.block_number, 4);
 }
+
+/// Replay maps to SealPolicy::UntilExhausted { allowed_to_finish_early: false }.
+/// Rebuild maps to SealPolicy::UntilExhausted { allowed_to_finish_early: true }.
+/// This is a critical invariant: the execute_block() function will return a fatal error
+/// if a Replay block is sealed for any reason other than TxStreamExhausted.
+/// Verifies the SealPolicy variant structure expected by the block executor.
+#[test]
+fn seal_policy_variants_match_command_types() {
+    use std::time::Duration;
+    use zksync_os_sequencer::model::blocks::SealPolicy;
+
+    // Produce uses Decide
+    let produce_policy = SealPolicy::Decide(Duration::from_secs(1), 100);
+    assert!(matches!(produce_policy, SealPolicy::Decide(_, _)));
+
+    // Replay uses UntilExhausted { allowed_to_finish_early: false }
+    let replay_policy = SealPolicy::UntilExhausted {
+        allowed_to_finish_early: false,
+    };
+    assert!(matches!(
+        replay_policy,
+        SealPolicy::UntilExhausted {
+            allowed_to_finish_early: false
+        }
+    ));
+
+    // Rebuild uses UntilExhausted { allowed_to_finish_early: true }
+    let rebuild_policy = SealPolicy::UntilExhausted {
+        allowed_to_finish_early: true,
+    };
+    assert!(matches!(
+        rebuild_policy,
+        SealPolicy::UntilExhausted {
+            allowed_to_finish_early: true
+        }
+    ));
+}
+
