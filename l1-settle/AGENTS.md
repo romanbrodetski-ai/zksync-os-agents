@@ -29,15 +29,6 @@ Also check `knowledge/open-questions.md` — if the PR resolves an open question
 
 ---
 
-## Setup note
-
-After bumping the submodule, copy forge-compiled contract artifacts (gitignored, absent in fresh checkouts):
-
-```sh
-cp -al ../zksync-os-server/integration-tests/test-contracts/out zksync-os-server/integration-tests/test-contracts/out
-```
-
----
 
 ## Tests
 
@@ -46,3 +37,11 @@ cargo nextest run -p zksync_os_l1_settle_tests --test unit_calldata \
   --test unit_stored_batch_info --test unit_snark_public_input \
   --test unit_2fa --test unit_execute
 ```
+- `knowledge/` — curated facts, invariants, and edge cases about the feature area
+- `tests/` — Rust integration tests that encode those invariants as runnable checks
+- `zksync-os-server/` — a git submodule pinned to the server commit the knowledge and tests were generated against
+
+The submodule is the versioning anchor: knowledge and tests are always consistent with a specific server SHA.
+When the server evolves, the agent bumps the submodule and updates knowledge/tests atomically in one commit.
+This makes it easy to see exactly what server changes triggered a knowledge refresh (`git log` on the submodule)
+and to check whether an agent is stale (compare submodule SHA to the base branch HEAD).
