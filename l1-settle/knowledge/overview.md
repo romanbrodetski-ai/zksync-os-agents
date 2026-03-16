@@ -57,6 +57,11 @@ The L1 settling pipeline commits, proves, and executes ZKsync OS batches on Ethe
 10. `AlreadyCommitted` or `NotNeeded` signature data is accepted when 2FA is disabled or threshold=0.
 22. At startup (main node only), `check_batch_verification_mismatch` warns when the node's configured `threshold` is **lower** than the on-chain threshold; the pipeline then enforces the effective threshold via `max(server.threshold, l1.threshold)`. No warning is issued when the server threshold is higher (safe direction).
 
+### Batch verification transport (2FA wire protocol)
+26. The batch verification wire format is pinned to **v1** (`BATCH_VERIFICATION_WIRE_FORMAT_VERSION = 1`). The server's `ensure_supported_wire_format` function returns an error (not a panic) if the client announces any other version.
+27. `CommitBatchInfo` is **no longer the transport object** for batch verification. A dedicated `BatchVerificationCommitInfo` struct in `lib/batch_verification/src/wire_format/payload.rs` acts as the canonical transport boundary. It has `first_block_number: u64` and `last_block_number: u64` as required fields (not `Option`), and omits `number_of_layer2_txs` and `sl_chain_id`.
+28. **Protocol v31 requires a v2 wire transport upgrade before 2FA batch verification is safe.** The code includes a TODO comment in `lib/types/src/protocol/mod.rs:is_live()` stating that promoting v31 to live without first deploying v2 wire transport will make batch verification incomplete and compromise 2FA security.
+
 ### SNARK public input
 11. For each batch `i`: `public_input_i = keccak(prev_state_commitment || state_commitment || commitment)`.
 12. For a range of batches: result is chained as `keccak(prev_result || next_input) >> 32` (shift-right 4 bytes).
@@ -85,6 +90,7 @@ The L1 settling pipeline commits, proves, and executes ZKsync OS batches on Ethe
 
 ## Important Edge Cases and Failure Modes
 
+- **Protocol v31 upgrade without v2 batch verification transport**: the `is_live()` function in `lib/types/src/protocol/mod.rs` includes a TODO that explicitly blocks v31 promotion until v2 wire transport is deployed. If ignored, 2FA batch verification will fail for all ENs running v31.
 - **Batch already committed on L1** (e.g., after a restart): `GaplessCommitter` emits `Passthrough` instead of `SendToL1`; the L1 sender must drain all passthrough commands before switching to normal mode.
 - **Protocol version mismatch**: `encode_commit_batch_data` panics on unsupported `protocol_version_minor` (currently only 29, 30, 31 are supported; 32 is handled in execute but not in commit calldata).
 - **Unsupported execution version in prove**: panics if execution version is not in {4, 5, 6}.
