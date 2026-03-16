@@ -3,6 +3,10 @@ pub mod mocks;
 #[cfg(test)]
 mod backpressure;
 #[cfg(test)]
+mod canonizer;
+#[cfg(test)]
+mod overlay_buffer;
+#[cfg(test)]
 mod pipeline_flow;
 #[cfg(test)]
 mod replay_storage;

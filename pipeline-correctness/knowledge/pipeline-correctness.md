@@ -28,7 +28,7 @@ by bounded `mpsc` channels. Each component:
 ### Main Node Pipeline (block production + L1 commitment)
 
 ```
-CommandSource → Sequencer → TreeManager
+NodeCommandSource → BlockExecutor → BlockCanonizer → BlockApplier → TreeManager
 → ProverInputGenerator → Batcher → BatchVerification → FriProving
 → GaplessCommitter → L1Sender(Commit) → SnarkProving → GaplessL1ProofSender
 → L1Sender(Proof) → PriorityTree → L1Sender(Execute) → BatchSink
@@ -37,37 +37,65 @@ CommandSource → Sequencer → TreeManager
 ### External Node Pipeline (replay only)
 
 ```
-ExternalNodeCommandSource → Sequencer
+ExternalNodeCommandSource → BlockExecutor → BlockApplier
 → [optional: RevmConsistencyChecker] → TreeManager → [optional: BatchVerification]
 ```
 
-### Sequencer Component
+### Sequencer Split: BlockExecutor + BlockCanonizer + BlockApplier
 
-The `Sequencer` is a unified pipeline component that combines block execution and
-persistence into a single stage. It replaces the previous three-stage architecture
-(`BlockExecutor → BlockCanonizer → BlockApplier`).
+The previous monolithic `Sequencer` component has been split into three pipeline stages:
 
-- Input: `BlockCommand` (from CommandSource)
-- Output: `(BlockOutput, ReplayRecord)` (to TreeManager and downstream)
+**BlockExecutor** (`lib/sequencer/src/execution/block_executor.rs`)
+- Input: `BlockCommand`
+- Output: `(BlockOutput, ReplayRecord, BlockCommandType)`
+- `OUTPUT_BUFFER_SIZE = 1`
+- Executes blocks in the VM but does NOT persist anything to disk
+- Keeps an `OverlayBuffer` in memory — each executed block's state diffs are held there
+  until `BlockApplier` confirms persistence (via `sync_with_base_and_build_view_for_block`)
+- Updates mempool state via `BlockContextProvider::on_canonical_state_change()` immediately
+  after execution (before persistence)
+- Passes `BlockCommandType` downstream so `BlockApplier` can determine `override_allowed`
+
+**BlockCanonizer** (`lib/sequencer/src/execution/block_canonizer.rs`)
+- Input: `(BlockOutput, ReplayRecord, BlockCommandType)`
+- Output: `(BlockOutput, ReplayRecord, BlockCommandType)`
+- `OUTPUT_BUFFER_SIZE = 2`
+- Acts as a canonization fence: only canonized blocks flow downstream to `BlockApplier`
+- `Replay` blocks pass through immediately (already canonical)
+- `Produce`/`Rebuild` blocks are sent to consensus via `BlockCanonization::propose()`,
+  queued in `produced_queue` (max `MAX_PRODUCED_QUEUE_SIZE = 2`), and only released
+  when consensus returns the matching canonized record
+- If canonized record doesn't match the front of `produced_queue`, fatal error
+- Used only in the Main Node pipeline; External Node pipeline skips it
+
+**BlockApplier** (`lib/sequencer/src/execution/block_applier.rs`)
+- Input: `(BlockOutput, ReplayRecord, BlockCommandType)`
+- Output: `(BlockOutput, ReplayRecord)`
 - `OUTPUT_BUFFER_SIZE = 5`
+- Persists each block to the three stores (WAL, state, repository)
+- Determines `override_allowed` from `BlockCommandType`:
+  - `Rebuild` → true
+  - Any type on external node → true
+  - Otherwise → false
 
-The Sequencer's run loop for each block:
-1. Receive `BlockCommand` from upstream
-2. Prepare the command via `BlockContextProvider`
-3. Call `execute_block()` — a stateless pure function that executes the block in the VM
-4. Persist to WAL (`WriteReplay::write()`)
-5. Persist state diffs (`WriteState::add_block_result()`)
-6. Persist to repository (`WriteRepository::populate()`)
-7. Update mempool state via `BlockContextProvider::on_canonical_state_change()`
-8. Send `(BlockOutput, ReplayRecord)` downstream
+### OverlayBuffer
 
-Because execution and persistence happen in the same loop iteration, the state is
-always up to date before the next block executes. This eliminates the need for the
-previous `OverlayBuffer` mechanism.
+Because `BlockExecutor` executes blocks before they are persisted, it maintains an
+`OverlayBuffer` of all executed-but-not-yet-persisted block state diffs. When preparing
+state for the next block execution, `sync_with_base_and_build_view_for_block` purges
+already-persisted blocks and builds a composite view layering the overlays on top of the
+base state. The overlay buffer is implicitly bounded by the total buffering in the pipeline
+between `BlockExecutor` and `BlockApplier`.
+
+**Key invariant:** The `OverlayBuffer.overlays` `Arc` must have a strong count of exactly 1
+when `add_block` or `purge_already_persisted_blocks` is called. Any live `OverriddenStateView`
+holding a clone of the Arc would violate this and trigger an assertion panic.
 
 **Key files:**
-- `lib/sequencer/src/execution/mod.rs` — `Sequencer` struct and `PipelineComponent` impl
-- `lib/sequencer/src/execution/block_executor.rs` — `execute_block()` pure function
+- `lib/storage_api/src/overlay_buffer.rs` — `OverlayBuffer`, `BlockOverlay`
+- `lib/sequencer/src/execution/block_executor.rs` — `BlockExecutor` with overlay integration
+- `lib/sequencer/src/execution/block_canonizer.rs` — `BlockCanonizer`, `NoopCanonization`
+- `lib/sequencer/src/execution/block_applier.rs` — `BlockApplier`
 
 ---
 
@@ -83,9 +111,10 @@ within the pipeline.
 The replay storage (`WriteReplay`) panics if a block is not the next after latest.
 
 **Where enforced:**
-- `BlockCommand::block_number()` — each command carries its block number
-- `CommandSource` — generates commands in sequential order (WAL replay, then produce starting
-  from `last_block_in_wal + 1`)
+- `BlockContextProvider` tracks `next_block_number`, incremented in
+  `on_canonical_state_change()` after each block. For Replay commands, validates that
+  `next_block_number == record.block_context.block_number` (hard error if mismatch).
+- `CommandSource` — generates commands in sequential order (WAL replay, then produce)
 - `WriteReplay::write()` — "MUST panic if the record is not next after the latest record"
 - `TreeManager` — tracks processed block count, skips already-processed blocks
 - Pipeline channel ordering — single-producer single-consumer channels guarantee FIFO
@@ -102,11 +131,16 @@ blocks on send, propagating backpressure up the chain.
 **Why:** Without backpressure, a fast producer would outrun a slow consumer
 (e.g., TreeManager doing disk I/O), consuming unbounded memory.
 
-**Key buffer sizes and their rationale:**
-- `Sequencer::OUTPUT_BUFFER_SIZE = 5` — the Sequencer handles both execution and persistence,
-  so a moderate buffer allows downstream components (TreeManager etc.) some breathing room.
-- `MainNodeCommandSource::OUTPUT_BUFFER_SIZE = 5` — allows the command source to feed blocks
-  ahead of the sequencer.
+**Key buffer sizes and their rationale (as of 0.17.0):**
+- `NodeCommandSource::OUTPUT_BUFFER_SIZE = 1` — reduced from 5; command source stays close
+  to execution to avoid queuing stale produce commands
+- `BlockExecutor::OUTPUT_BUFFER_SIZE = 1` — small buffer before `BlockCanonizer`; the
+  canonizer has its own `produced_queue` buffer
+- `BlockCanonizer::OUTPUT_BUFFER_SIZE = 2` — mild persistence latency buffer before
+  `BlockApplier`
+- `BlockCanonizer::MAX_PRODUCED_QUEUE_SIZE = 2` — max blocks awaiting consensus; when
+  reached, backpressure is applied to `BlockExecutor`
+- `BlockApplier::OUTPUT_BUFFER_SIZE = 5` — breathing room for downstream (TreeManager etc.)
 
 **Failure mode:** If someone changes a buffer size to 0, the component won't start processing
 the next item until the current one is picked up. If changed to unbounded (or very large),
@@ -135,7 +169,8 @@ whether re-execution overwrites existing data.
 Components must handle seeing the same block number again without corrupting data.
 
 **Where enforced:**
-- `Sequencer` sets `override_allowed = true` for `Rebuild` commands and external nodes
+- `BlockApplier` derives `override_allowed` from `BlockCommandType`:
+  `Rebuild` → true, external node → true, otherwise → false
 - `TreeManager` skips blocks already in the tree (idempotent)
 - `WriteReplay::write()` returns false (no write) for existing blocks when override not allowed
 
@@ -159,21 +194,27 @@ to revert.
 Understanding the three command types is critical for reviewing pipeline changes:
 
 ### BlockCommand::Produce
-- Generated by `MainNodeCommandSource` via `command_source()` stream
-- Carries `block_number`, `block_time`, and `max_transactions_in_block`
+- Generated by `MainNodeCommandSource` in its `run_loop()`
+- `ProduceCommand` is now a unit struct — carries no parameters
+- Block number, block time, and max transactions are fields on `BlockContextProvider`
+  (`next_block_number`, `block_time`, `max_transactions_in_block`)
 - Transactions selected from mempool by `BlockContextProvider`
 - Uses `SealPolicy::Decide(timeout, max_txs)` — block seals on timeout or tx limit
 - Uses `InvalidTxPolicy::RejectAndContinue` — skip bad txs, keep producing
 
 ### BlockCommand::Replay
-- Two sources: WAL replay on startup, or canonized blocks from other nodes
+- Two sources: WAL replay on startup (via `forward_range_with()`), or canonized blocks from
+  `BlockCanonizer` when consensus elects a different leader
 - Transactions come from the `ReplayRecord` itself (predetermined)
+- `BlockContextProvider` validates `next_block_number == record.block_context.block_number`
+  (hard error on mismatch)
 - Uses `SealPolicy::UntilExhausted` — must execute all txs in the record
 - Uses `InvalidTxPolicy::Abort` — any invalid tx is a fatal error (deterministic replay)
 
 ### BlockCommand::Rebuild
 - Used to rollback to an earlier state and re-execute
-- Like Produce but with `override_allowed = true` in `Sequencer`
+- Like Replay but `BlockApplier` sets `override_allowed = true`
+- `BlockCanonizer` sends Rebuild blocks to consensus (same path as Produce)
 
 **Key distinction:** A Replay that fails is a critical error (the canonical chain is
 inconsistent). A Produce that fails can be retried with different transactions.
@@ -186,24 +227,31 @@ inconsistent). A Produce that fails can be retried with different transactions.
 
 ### Main Node (`MainNodeCommandSource`)
 
-The main node command source generates a stream of commands using the `command_source()` function:
+The main node command source operates in three phases:
 
-1. **Replay phase**: Streams WAL replay records from `starting_block` to `replay_end`
-2. **Rebuild phase** (optional): If `rebuild_options` is set, rebuilds blocks from
-   `rebuild_from_block` to `last_block_in_wal`
-3. **Produce phase**: Generates `Produce` commands with incrementing block numbers
-   starting from `last_block_in_wal + 1`
+1. **Replay phase**: Sends WAL replay records via `ReadReplayExt::forward_range_with()` to
+   the output channel as `BlockCommand::Replay`. Covers `starting_block..=replay_until`.
+2. **Rebuild phase** (optional): If `rebuild_options` is set, sends `BlockCommand::Rebuild`
+   for each block from `rebuild_from_block` to `last_block_in_wal`.
+3. **Produce loop** (`run_loop()`): Sends `BlockCommand::Produce(ProduceCommand)` indefinitely.
+   Also listens on `replays_to_execute` channel (fed by `BlockCanonizer` when another node
+   is canonizing blocks). If any replay arrives, the main node crashes — it asserts it is
+   the sole leader.
 
-The three phases are chained as streams: `replay_wal_stream.chain(rebuild_stream).chain(produce_stream)`.
+**Key change from previous design:** The command source no longer generates a stream; it
+directly sends to the mpsc channel. `ProduceCommand` no longer carries `block_number`,
+`block_time`, or `max_transactions_in_block` — those are owned by `BlockContextProvider`.
+`OUTPUT_BUFFER_SIZE` reduced from 5 to 1.
 
 **Where to look:**
-- `node/bin/src/command_source.rs` — `command_source()` function and `MainNodeCommandSource`
+- `node/bin/src/command_source.rs` — `MainNodeCommandSource`
 
 ### External Node (`ExternalNodeCommandSource`)
 
 - Receives `ReplayRecord`s from the main node via a channel
 - Wraps each in `BlockCommand::Replay` and sends downstream
 - Optional `up_to_block` limit for syncing to a specific block
+- No `BlockCanonizer` in the EN pipeline
 
 ---
 
@@ -227,7 +275,7 @@ could cause L1 priority ID desynchronization.
 
 ## 6. State and Persistence Model
 
-### Write path (Sequencer)
+### Write path (BlockApplier)
 Each block write involves three stores, in this order:
 1. `WriteReplay::write()` — WAL record (source of truth for block history)
 2. `WriteState::add_block_result()` — key-value state diffs
@@ -243,14 +291,34 @@ fill in the gaps.
 - `ReadRepository` — API queries (blocks, transactions, receipts)
 
 ### Block Execution State View
-The `execute_block()` function creates a state view at `block_number - 1` directly from
-the persistent state. Because the Sequencer persists each block before executing the next,
-the state is always up to date. Forced preimages are injected via `OverriddenStateView::with_preimages()`.
+
+`BlockExecutor` builds a state view for block N by calling
+`OverlayBuffer::sync_with_base_and_build_view_for_block(base_state, N)`. This:
+1. Purges already-persisted overlays from the buffer
+2. If `base_latest >= N - 1`, returns a direct view of the base state (overlays empty)
+3. Otherwise, layers the in-memory overlays on top of the base state via
+   `OverriddenStateView<impl ViewState, Arc<BTreeMap<BlockNumber, BlockOverlay>>>`
+
+Forced preimages from `Replay`/`Rebuild` commands are injected via
+`OverriddenStateView::with_preimages()` at execution time (not stored in the overlay buffer).
+
+### OverrideProvider Trait
+
+`OverriddenStateView` is now generic over `O: OverrideProvider`. Two implementations:
+- `OwnedOverrides` — owned HashMap pair, used for RPC `eth_call` with `StateOverride`
+- `Arc<BTreeMap<BlockNumber, BlockOverlay>>` — the overlay buffer, used by `BlockExecutor`
+
+The constructor change: `OverriddenStateView::new(inner, state_overrides: StateOverride)` is
+replaced by:
+- `OverriddenStateView::new(inner, overrides: O)` — generic constructor
+- `OverriddenStateView::with_state_overrides(inner, state_overrides)` — for RPC use
+- `OverriddenStateView::with_preimages(inner, preimage_overrides)` — unchanged
 
 **Where to look:**
 - `lib/storage_api/src/` — all trait definitions
-- `lib/sequencer/src/execution/mod.rs` — Sequencer persistence orchestration
-- `lib/sequencer/src/execution/block_executor.rs` — execute_block() state view creation
+- `lib/storage_api/src/overlay_buffer.rs` — OverlayBuffer
+- `lib/sequencer/src/execution/block_applier.rs` — BlockApplier persistence orchestration
+- `lib/sequencer/src/execution/block_executor.rs` — BlockExecutor with overlay
 
 ---
 
@@ -260,18 +328,27 @@ When reviewing PRs that touch pipeline code, check for:
 
 ### Channel and Concurrency Issues
 - **Unbounded channels:** Any `mpsc::channel` without a size limit is a memory leak risk
-- **Deadlock potential:** Two components waiting on each other's channels
+- **Deadlock potential:** Two components waiting on each other's channels; especially watch
+  the `BlockCanonizer ↔ MainNodeCommandSource` channel (`canonized_blocks_for_execution`)
 - **Cancellation safety:** Operations in `tokio::select!` branches must be cancellation-safe.
   If a future is dropped mid-execution, state must remain consistent.
+- **Arc refcount contract in OverlayBuffer:** `OverriddenStateView` holds an `Arc` clone of
+  the overlay map; if any view is still alive when `add_block` is called, the Arc assertion
+  panics. Ensure VM execution fully drops the view before `add_block`.
 
 ### State Consistency
 - **override_allowed correctness:** Only Rebuild and external node should allow overrides.
-  A bug here could silently overwrite canonical state.
-- **Block number continuity:** Any new component that touches block numbers must maintain
-  the sequential invariant
-- **Partial persistence:** If adding a new store to Sequencer, consider crash recovery
-- **State view freshness:** `execute_block()` reads state at `block_number - 1`. If
-  persistence hasn't completed for the previous block, execution will read stale data.
+  A bug here could silently overwrite canonical state. Now determined in `BlockApplier` from
+  `BlockCommandType`, not in `BlockExecutor`.
+- **Block number continuity:** `BlockContextProvider.next_block_number` must match the actual
+  block being produced. It is incremented in `on_canonical_state_change()` — if this is not
+  called after each block, the counter drifts.
+- **Partial persistence:** If adding a new store to BlockApplier, consider crash recovery
+- **State view freshness:** `BlockExecutor` reads state at `block_number - 1` via
+  `OverlayBuffer`. If the overlay is stale (e.g., block N-1 executed but not in overlay or
+  base), the bail in `sync_with_base_and_build_view_for_block` will fire.
+- **OverlayBuffer contiguity:** `add_block` panics if block number is not contiguous with
+  the last overlay. If `BlockExecutor` restarts or skips a block, the overlay becomes invalid.
 
 ### Pipeline Topology
 - **Buffer size changes:** Changing `OUTPUT_BUFFER_SIZE` affects backpressure for the entire
@@ -279,6 +356,9 @@ When reviewing PRs that touch pipeline code, check for:
 - **New components:** Adding a pipeline stage changes the backpressure profile and increases
   latency. Consider whether the new stage needs to be in the critical path.
 - **Conditional components:** `pipe_opt()` and `pipe_if()` must preserve type compatibility
+- **BlockCanonizer absence in EN pipeline:** The EN pipeline correctly skips `BlockCanonizer`
+  since it only replays. Any future EN change that adds non-replay block production must
+  consider adding a canonizer or equivalent fence.
 
 ### Config Optionality (Main Node vs External Node)
 
@@ -307,14 +387,17 @@ Quick reference for the most important files in the pipeline:
 | Pipeline builder | `lib/pipeline/src/builder.rs` | pipe(), spawn() |
 | Pipeline construction | `node/bin/src/lib.rs` | Main & EN pipeline wiring |
 | Block commands | `lib/sequencer/src/model/blocks.rs` | Command types, seal policies |
-| Sequencer | `lib/sequencer/src/execution/mod.rs` | Unified execution + persistence |
-| Block execution | `lib/sequencer/src/execution/block_executor.rs` | Pure function VM execution |
+| BlockExecutor | `lib/sequencer/src/execution/block_executor.rs` | Execution + overlay buffer |
+| BlockCanonizer | `lib/sequencer/src/execution/block_canonizer.rs` | Canonization fence |
+| BlockApplier | `lib/sequencer/src/execution/block_applier.rs` | Persistence orchestration |
+| VM execution | `lib/sequencer/src/execution/execute_block_in_vm.rs` | Pure function VM execution |
 | BlockContextProvider | `lib/sequencer/src/execution/block_context_provider.rs` | Tx selection, block context |
-| Command source | `node/bin/src/command_source.rs` | Stream-based block production |
+| Command source | `node/bin/src/command_source.rs` | Channel-based block production |
 | Transaction pool | `lib/mempool/src/pool.rs` | Subpool priority ordering |
 | Replay storage | `lib/storage_api/src/replay.rs` | ReadReplay/WriteReplay traits |
 | State storage | `lib/storage_api/src/state.rs` | ReadStateHistory/WriteState traits |
-| State override view | `lib/storage_api/src/state_override_view.rs` | OverriddenStateView for preimages |
+| State override view | `lib/storage_api/src/state_override_view.rs` | OverriddenStateView, OverrideProvider |
+| Overlay buffer | `lib/storage_api/src/overlay_buffer.rs` | In-memory state diffs |
 | Tree manager | `node/bin/src/tree_manager.rs` | Merkle tree updates |
 | Batcher | `node/bin/src/batcher/mod.rs` | Batch boundary logic |
 | Fee provider | `lib/sequencer/src/execution/fee_provider.rs` | Pubdata pricing, Option<PubdataMode> |

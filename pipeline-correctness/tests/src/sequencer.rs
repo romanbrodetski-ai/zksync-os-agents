@@ -1,66 +1,53 @@
-//! Tests for the unified Sequencer pipeline component.
+//! Tests for the BlockExecutor, BlockCanonizer, and BlockApplier pipeline components.
 //!
-//! The Sequencer combines block execution and persistence into a single pipeline stage.
-//! It replaced the previous BlockExecutor → BlockCanonizer → BlockApplier chain.
+//! The previous monolithic Sequencer has been split into three stages:
+//!   BlockExecutor — executes blocks in the VM, does NOT persist, maintains OverlayBuffer
+//!   BlockCanonizer — canonization fence; passes Replay through, queues Produce for consensus
+//!   BlockApplier — persists blocks to WAL, state, and repository
 //!
 //! These tests verify:
-//! - The Sequencer's OUTPUT_BUFFER_SIZE is set correctly
-//! - The command source generates commands with correct block numbers
-//! - ProduceCommand carries block_time and max_transactions_in_block
+//! - BlockApplier's output type is (BlockOutput, ReplayRecord)
+//! - BlockCommandType carries the override_allowed semantics correctly
+//! - ProduceCommand is a unit struct (block params moved to BlockContextProvider)
+//! - forward_range_with sends records to a channel in order
 
-use zksync_os_sequencer::model::blocks::{BlockCommand, ProduceCommand};
+use zksync_os_sequencer::model::blocks::{BlockCommand, BlockCommandType, ProduceCommand};
 
-/// ProduceCommand must carry block_number, block_time, and max_transactions_in_block.
-/// These were previously stored in BlockContextProvider; now they travel with the command.
+/// ProduceCommand is now a unit struct. Block number, block_time, and
+/// max_transactions_in_block are fields on BlockContextProvider, not on the command.
 #[test]
-fn produce_command_carries_block_params() {
-    let cmd = ProduceCommand {
-        block_number: 42,
-        block_time: std::time::Duration::from_secs(1),
-        max_transactions_in_block: 100,
-    };
-
-    assert_eq!(cmd.block_number, 42);
-    assert_eq!(cmd.block_time, std::time::Duration::from_secs(1));
-    assert_eq!(cmd.max_transactions_in_block, 100);
+fn produce_command_is_unit_struct() {
+    // Compile-time check: ProduceCommand can be constructed with no fields
+    let _cmd = ProduceCommand;
+    let _block_cmd = BlockCommand::Produce(ProduceCommand);
 }
 
-/// BlockCommand::block_number() must return the correct block number for each variant.
+/// BlockCommandType encodes the original command variant for use by BlockApplier.
+/// Rebuild must map to true override_allowed; Replay and Produce must not.
 #[test]
-fn block_command_block_number() {
+fn block_command_type_encodes_override_intent() {
     use crate::mocks::make_replay_record;
     use zksync_os_sequencer::model::blocks::RebuildCommand;
 
-    // Replay
-    let replay_record = make_replay_record(10, 1000);
-    let cmd = BlockCommand::Replay(Box::new(replay_record));
-    assert_eq!(cmd.block_number(), 10);
+    let replay_cmd = BlockCommand::Replay(Box::new(make_replay_record(10, 1000)));
+    assert!(matches!(replay_cmd.command_type(), BlockCommandType::Replay));
 
-    // Produce
-    let cmd = BlockCommand::Produce(ProduceCommand {
-        block_number: 20,
-        block_time: std::time::Duration::from_secs(1),
-        max_transactions_in_block: 50,
-    });
-    assert_eq!(cmd.block_number(), 20);
+    let produce_cmd = BlockCommand::Produce(ProduceCommand);
+    assert!(matches!(produce_cmd.command_type(), BlockCommandType::Produce));
 
-    // Rebuild
-    let rebuild_record = make_replay_record(30, 2000);
-    let cmd = BlockCommand::Rebuild(Box::new(RebuildCommand {
-        replay_record: rebuild_record,
+    let rebuild_cmd = BlockCommand::Rebuild(Box::new(RebuildCommand {
+        replay_record: make_replay_record(20, 2000),
         make_empty: false,
     }));
-    assert_eq!(cmd.block_number(), 30);
+    assert!(matches!(rebuild_cmd.command_type(), BlockCommandType::Rebuild));
 }
 
-/// The Sequencer output type is (BlockOutput, ReplayRecord) — no more BlockCommandType.
-/// The old pipeline had a third element (BlockCommandType) that was used by BlockApplier
-/// to determine override_allowed. Now the Sequencer handles this internally.
+/// BlockApplier's output type is (BlockOutput, ReplayRecord).
+/// BlockExecutor's output type is (BlockOutput, ReplayRecord, BlockCommandType).
+/// This is a compile-time check.
 #[test]
-fn sequencer_output_type_is_two_tuple() {
-    // This is a compile-time check. If the Sequencer output type changes,
-    // this test will fail to compile.
-    fn _assert_output_type(
+fn block_applier_output_type_is_two_tuple() {
+    fn _assert_block_applier_output(
         _: (
             zksync_os_interface::types::BlockOutput,
             zksync_os_storage_api::ReplayRecord,
@@ -69,17 +56,15 @@ fn sequencer_output_type_is_two_tuple() {
     }
 }
 
-/// ReadReplayExt::stream() should return records in order.
+/// ReadReplayExt::forward_range_with should send records in ascending block order.
 #[test]
-fn replay_stream_returns_records_in_order() {
+fn forward_range_with_sends_records_in_order() {
     use crate::mocks::MockReplayStorage;
     use alloy::primitives::{B256, Sealed};
-    use futures::StreamExt;
     use zksync_os_storage_api::{ReadReplayExt, WriteReplay};
 
     let storage = MockReplayStorage::new().with_genesis();
 
-    // Write blocks 1-5
     for i in 1..=5u64 {
         let record = crate::mocks::make_replay_record(i, 1000 + i);
         storage.write(
@@ -88,12 +73,87 @@ fn replay_stream_returns_records_in_order() {
         );
     }
 
-    // Stream blocks 2-4
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let records: Vec<_> = rt.block_on(async { storage.stream(2, 4).collect::<Vec<_>>().await });
+    let records = rt.block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        storage
+            .forward_range_with(2, 4, tx, |r| r)
+            .await
+            .expect("forward_range_with should succeed");
+
+        let mut out = vec![];
+        while let Ok(r) = rx.try_recv() {
+            out.push(r);
+        }
+        out
+    });
 
     assert_eq!(records.len(), 3);
     assert_eq!(records[0].block_context.block_number, 2);
     assert_eq!(records[1].block_context.block_number, 3);
     assert_eq!(records[2].block_context.block_number, 4);
+}
+
+/// forward_range_with should send all records in [start, end] inclusive.
+#[test]
+fn forward_range_with_inclusive_bounds() {
+    use crate::mocks::MockReplayStorage;
+    use alloy::primitives::{B256, Sealed};
+    use zksync_os_storage_api::{ReadReplayExt, WriteReplay};
+
+    let storage = MockReplayStorage::new().with_genesis();
+
+    for i in 1..=3u64 {
+        let record = crate::mocks::make_replay_record(i, 1000 + i);
+        storage.write(
+            Sealed::new_unchecked(record, B256::from([i as u8; 32])),
+            false,
+        );
+    }
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let records = rt.block_on(async {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        storage
+            .forward_range_with(0, 3, tx, |r| r)
+            .await
+            .expect("forward_range_with should succeed");
+
+        let mut out = vec![];
+        while let Ok(r) = rx.try_recv() {
+            out.push(r);
+        }
+        out
+    });
+
+    assert_eq!(records.len(), 4, "must include block 0 and block 3");
+    assert_eq!(records[0].block_context.block_number, 0);
+    assert_eq!(records[3].block_context.block_number, 3);
+}
+
+/// forward_range_with with a closed channel should return Ok (caller detects close).
+#[test]
+fn forward_range_with_closed_channel_returns_ok() {
+    use crate::mocks::MockReplayStorage;
+    use alloy::primitives::{B256, Sealed};
+    use zksync_os_storage_api::{ReadReplayExt, WriteReplay};
+
+    let storage = MockReplayStorage::new().with_genesis();
+    for i in 1..=5u64 {
+        let record = crate::mocks::make_replay_record(i, 1000 + i);
+        storage.write(
+            Sealed::new_unchecked(record, B256::from([i as u8; 32])),
+            false,
+        );
+    }
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(async {
+        let (tx, rx) = tokio::sync::mpsc::channel::<_>(1);
+        drop(rx); // Close the receiver immediately
+        storage.forward_range_with(1, 5, tx, |r| r).await
+    });
+
+    // Should return Ok even though the channel is closed — caller detects closure
+    assert!(result.is_ok());
 }
