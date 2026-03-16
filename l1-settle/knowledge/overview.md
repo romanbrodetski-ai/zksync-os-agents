@@ -26,6 +26,22 @@ The L1 settling pipeline commits, proves, and executes ZKsync OS batches on Ethe
 | Batch persistence on execute | `lib/l1_watcher/src/persist_batch_watcher.rs` |
 | Orchestration / wiring | `node/bin/src/lib.rs` (`run()`) — wires all pipeline stages, fetches initial `L1State`, dispatches L1 senders, enforces pubdata-mode vs DA-mode consistency, checks 2FA config mismatch |
 
+### Pipeline topology (as of server 4395f993 / v0.17.0)
+
+The upstream sequencer was split in v0.17.0 (PR #953). The old `Sequencer` stage is now three stages:
+
+```
+MainNodeCommandSource → BlockExecutor → BlockCanonizer → BlockApplier → [downstream]
+```
+
+On external nodes, `BlockCanonizer` is absent:
+
+```
+ExternalNodeCommandSource → BlockExecutor → BlockApplier → [downstream]
+```
+
+`BlockApplier` output type is `(BlockOutput, ReplayRecord)` — identical to the old `Sequencer` output — so all downstream pipeline stages (TreeManager, ProverInputGenerator, Batcher, BatchVerification, GaplessCommitter, L1 sender chain) are unaffected. `BlockCanonizer` currently uses `NoopCanonization` (pass-through); when real consensus is integrated, canonization may introduce reordering or delays before blocks reach the Batcher.
+
 ## Possibly Out of Scope (adjacent but distinct ownership)
 
 - FRI proof generation internals (`lib/multivm/`, prover binary)
@@ -35,6 +51,7 @@ The L1 settling pipeline commits, proves, and executes ZKsync OS batches on Ethe
 - L1→L2 deposit / bridgehub interaction (covered by existing `l1.rs` integration tests)
 - Upgrade transaction handling
 - Gateway migration watcher
+- BlockExecutor / BlockCanonizer internals (consensus integration — not L1 settling)
 
 ---
 
