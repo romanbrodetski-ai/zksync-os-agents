@@ -1,99 +1,332 @@
-//! Tests for the unified Sequencer pipeline component.
-//!
-//! The Sequencer combines block execution and persistence into a single pipeline stage.
-//! It replaced the previous BlockExecutor → BlockCanonizer → BlockApplier chain.
-//!
-//! These tests verify:
-//! - The Sequencer's OUTPUT_BUFFER_SIZE is set correctly
-//! - The command source generates commands with correct block numbers
-//! - ProduceCommand carries block_time and max_transactions_in_block
+use crate::mocks::{
+    MockReplayStorage, MockRepository, MockWriteState, make_block_output, make_replay_record,
+};
+use alloy::primitives::B256;
+use async_trait::async_trait;
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use zksync_os_pipeline::{PeekableReceiver, PipelineComponent};
+use zksync_os_sequencer::config::SequencerConfig;
+use zksync_os_sequencer::execution::{
+    BlockApplier, BlockCanonization, BlockCanonizer, NoopCanonization,
+};
+use zksync_os_sequencer::model::blocks::{BlockCommand, BlockCommandType, ProduceCommand};
+use zksync_os_storage_api::{ReadReplayExt, ReplayRecord, WriteReplay};
+use zksync_os_types::NodeRole;
 
-use zksync_os_sequencer::model::blocks::{BlockCommand, ProduceCommand};
-
-/// ProduceCommand must carry block_number, block_time, and max_transactions_in_block.
-/// These were previously stored in BlockContextProvider; now they travel with the command.
-#[test]
-fn produce_command_carries_block_params() {
-    let cmd = ProduceCommand {
-        block_number: 42,
-        block_time: std::time::Duration::from_secs(1),
-        max_transactions_in_block: 100,
-    };
-
-    assert_eq!(cmd.block_number, 42);
-    assert_eq!(cmd.block_time, std::time::Duration::from_secs(1));
-    assert_eq!(cmd.max_transactions_in_block, 100);
-}
-
-/// BlockCommand::block_number() must return the correct block number for each variant.
-#[test]
-fn block_command_block_number() {
-    use crate::mocks::make_replay_record;
-    use zksync_os_sequencer::model::blocks::RebuildCommand;
-
-    // Replay
-    let replay_record = make_replay_record(10, 1000);
-    let cmd = BlockCommand::Replay(Box::new(replay_record));
-    assert_eq!(cmd.block_number(), 10);
-
-    // Produce
-    let cmd = BlockCommand::Produce(ProduceCommand {
-        block_number: 20,
-        block_time: std::time::Duration::from_secs(1),
-        max_transactions_in_block: 50,
-    });
-    assert_eq!(cmd.block_number(), 20);
-
-    // Rebuild
-    let rebuild_record = make_replay_record(30, 2000);
-    let cmd = BlockCommand::Rebuild(Box::new(RebuildCommand {
-        replay_record: rebuild_record,
-        make_empty: false,
-    }));
-    assert_eq!(cmd.block_number(), 30);
-}
-
-/// The Sequencer output type is (BlockOutput, ReplayRecord) — no more BlockCommandType.
-/// The old pipeline had a third element (BlockCommandType) that was used by BlockApplier
-/// to determine override_allowed. Now the Sequencer handles this internally.
-#[test]
-fn sequencer_output_type_is_two_tuple() {
-    // This is a compile-time check. If the Sequencer output type changes,
-    // this test will fail to compile.
-    fn _assert_output_type(
-        _: (
-            zksync_os_interface::types::BlockOutput,
-            zksync_os_storage_api::ReplayRecord,
-        ),
-    ) {
+fn test_config(node_role: NodeRole) -> SequencerConfig {
+    SequencerConfig {
+        node_role,
+        block_time: Duration::from_secs(1),
+        max_transactions_in_block: 10,
+        block_dump_path: PathBuf::new(),
+        block_gas_limit: 1_000_000,
+        block_pubdata_limit_bytes: 1_000_000,
+        max_blocks_to_produce: None,
+        interop_roots_per_tx: 1,
     }
 }
 
-/// ReadReplayExt::stream() should return records in order.
+#[derive(Debug)]
+struct MockConsensus {
+    proposals: mpsc::UnboundedSender<ReplayRecord>,
+    canonized: mpsc::Receiver<ReplayRecord>,
+}
+
+#[async_trait]
+impl BlockCanonization for MockConsensus {
+    async fn propose(&self, record: ReplayRecord) -> anyhow::Result<()> {
+        self.proposals.send(record)?;
+        Ok(())
+    }
+
+    async fn next_canonized(&mut self) -> anyhow::Result<ReplayRecord> {
+        self.canonized
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("canonized channel closed"))
+    }
+}
+
 #[test]
-fn replay_stream_returns_records_in_order() {
-    use crate::mocks::MockReplayStorage;
-    use alloy::primitives::{B256, Sealed};
-    use futures::StreamExt;
-    use zksync_os_storage_api::{ReadReplayExt, WriteReplay};
+fn produce_command_is_parameterless_and_block_commands_report_type() {
+    let produce = BlockCommand::Produce(ProduceCommand);
+    let replay = BlockCommand::Replay(Box::new(make_replay_record(3, 1003)));
+    let rebuild = BlockCommand::Rebuild(Box::new(
+        zksync_os_sequencer::model::blocks::RebuildCommand {
+            replay_record: make_replay_record(4, 1004),
+            make_empty: false,
+        },
+    ));
 
+    assert!(matches!(produce, BlockCommand::Produce(ProduceCommand)));
+    assert!(matches!(produce.command_type(), BlockCommandType::Produce));
+    assert!(matches!(replay.command_type(), BlockCommandType::Replay));
+    assert!(matches!(rebuild.command_type(), BlockCommandType::Rebuild));
+}
+
+#[tokio::test]
+async fn forward_range_with_sends_an_inclusive_ordered_range() {
     let storage = MockReplayStorage::new().with_genesis();
-
-    // Write blocks 1-5
-    for i in 1..=5u64 {
-        let record = crate::mocks::make_replay_record(i, 1000 + i);
+    for block in 1..=4 {
         storage.write(
-            Sealed::new_unchecked(record, B256::from([i as u8; 32])),
+            alloy::consensus::Sealed::new_unchecked(
+                make_replay_record(block, 1000 + block),
+                B256::from([block as u8; 32]),
+            ),
             false,
         );
     }
 
-    // Stream blocks 2-4
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let records: Vec<_> = rt.block_on(async { storage.stream(2, 4).collect::<Vec<_>>().await });
+    let (tx, mut rx) = mpsc::channel(8);
+    storage
+        .forward_range_with(1, 3, tx, |record| record.block_context.block_number)
+        .await
+        .unwrap();
 
-    assert_eq!(records.len(), 3);
-    assert_eq!(records[0].block_context.block_number, 2);
-    assert_eq!(records[1].block_context.block_number, 3);
-    assert_eq!(records[2].block_context.block_number, 4);
+    let mut seen = Vec::new();
+    while let Ok(block) = tokio::time::timeout(Duration::from_millis(20), rx.recv()).await {
+        let Some(block) = block else {
+            break;
+        };
+        seen.push(block);
+        if seen.len() == 3 {
+            break;
+        }
+    }
+
+    assert_eq!(seen, vec![1, 2, 3]);
+}
+
+#[tokio::test]
+async fn block_canonizer_forwards_replay_without_consensus_roundtrip() {
+    let (proposal_tx, mut proposal_rx) = mpsc::unbounded_channel();
+    let (_canonized_tx, canonized_rx) = mpsc::channel(4);
+    let (replay_tx, _replay_rx) = mpsc::channel(4);
+    let component = BlockCanonizer {
+        consensus: MockConsensus {
+            proposals: proposal_tx,
+            canonized: canonized_rx,
+        },
+        canonized_blocks_for_execution: replay_tx,
+    };
+
+    let (input_tx, input_rx) = mpsc::channel(4);
+    let (output_tx, mut output_rx) = mpsc::channel(4);
+    let handle = tokio::spawn(async move {
+        component
+            .run(PeekableReceiver::new(input_rx), output_tx)
+            .await
+    });
+
+    let block_output = make_block_output(1, 1001);
+    let replay_record = make_replay_record(1, 1001);
+    input_tx
+        .send((
+            block_output.clone(),
+            replay_record.clone(),
+            BlockCommandType::Replay,
+        ))
+        .await
+        .unwrap();
+
+    let forwarded = tokio::time::timeout(Duration::from_secs(1), output_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(forwarded.0.header.number, 1);
+    assert_eq!(forwarded.1, replay_record);
+    assert!(matches!(forwarded.2, BlockCommandType::Replay));
+    assert!(proposal_rx.try_recv().is_err());
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn block_canonizer_holds_produced_blocks_until_matching_canonization() {
+    let (proposal_tx, mut proposal_rx) = mpsc::unbounded_channel();
+    let (canonized_tx, canonized_rx) = mpsc::channel(4);
+    let (replay_tx, _replay_rx) = mpsc::channel(4);
+    let component = BlockCanonizer {
+        consensus: MockConsensus {
+            proposals: proposal_tx,
+            canonized: canonized_rx,
+        },
+        canonized_blocks_for_execution: replay_tx,
+    };
+
+    let (input_tx, input_rx) = mpsc::channel(4);
+    let (output_tx, mut output_rx) = mpsc::channel(4);
+    let handle = tokio::spawn(async move {
+        component
+            .run(PeekableReceiver::new(input_rx), output_tx)
+            .await
+    });
+
+    let block_output = make_block_output(7, 1007);
+    let replay_record = make_replay_record(7, 1007);
+    input_tx
+        .send((
+            block_output.clone(),
+            replay_record.clone(),
+            BlockCommandType::Produce,
+        ))
+        .await
+        .unwrap();
+
+    let proposed = tokio::time::timeout(Duration::from_secs(1), proposal_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(proposed, replay_record);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), output_rx.recv())
+            .await
+            .is_err(),
+        "produced block should stay behind the canonization fence"
+    );
+
+    canonized_tx.send(replay_record.clone()).await.unwrap();
+
+    let forwarded = tokio::time::timeout(Duration::from_secs(1), output_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(forwarded.0.header.number, 7);
+    assert_eq!(forwarded.1, replay_record);
+    assert!(matches!(forwarded.2, BlockCommandType::Produce));
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn block_canonizer_routes_foreign_canonized_blocks_back_for_replay() {
+    let component = BlockCanonizer {
+        consensus: NoopCanonization::new(),
+        canonized_blocks_for_execution: {
+            let (tx, _rx) = mpsc::channel(1);
+            tx
+        },
+    };
+    let sender = component.consensus.sender.clone();
+    let (replay_tx, mut replay_rx) = mpsc::channel(4);
+    let component = BlockCanonizer {
+        consensus: component.consensus,
+        canonized_blocks_for_execution: replay_tx,
+    };
+
+    let (_input_tx, input_rx) = mpsc::channel(4);
+    let (output_tx, mut output_rx) = mpsc::channel(4);
+    let handle = tokio::spawn(async move {
+        component
+            .run(PeekableReceiver::new(input_rx), output_tx)
+            .await
+    });
+
+    let replay_record = make_replay_record(9, 1009);
+    sender.send(replay_record.clone()).unwrap();
+
+    let requeued = tokio::time::timeout(Duration::from_secs(1), replay_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(requeued, replay_record);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), output_rx.recv())
+            .await
+            .is_err(),
+        "foreign canonized blocks must go back to the command source, not downstream"
+    );
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn block_applier_keeps_main_node_replays_non_overriding() {
+    let replay = MockReplayStorage::new().with_genesis();
+    let state = MockWriteState::new();
+    let repo = MockRepository::new();
+    let component = BlockApplier {
+        state: state.clone(),
+        replay: replay.clone(),
+        repositories: repo.clone(),
+        config: test_config(NodeRole::MainNode),
+    };
+
+    let (input_tx, input_rx) = mpsc::channel(4);
+    let (output_tx, mut output_rx) = mpsc::channel(4);
+    let handle = tokio::spawn(async move {
+        component
+            .run(PeekableReceiver::new(input_rx), output_tx)
+            .await
+    });
+
+    input_tx
+        .send((
+            make_block_output(1, 1001),
+            make_replay_record(1, 1001),
+            BlockCommandType::Replay,
+        ))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), output_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(replay.write_log(), vec![(1, false)]);
+    assert_eq!(state.write_log(), vec![(1, false)]);
+    assert_eq!(repo.populated_blocks(), vec![1]);
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn block_applier_allows_overrides_for_rebuilds_and_external_replays() {
+    let cases = [
+        (NodeRole::MainNode, BlockCommandType::Rebuild, 2),
+        (NodeRole::ExternalNode, BlockCommandType::Replay, 3),
+    ];
+
+    for (role, cmd_type, block_number) in cases {
+        let replay = MockReplayStorage::new().with_genesis();
+        let state = MockWriteState::new();
+        let repo = MockRepository::new();
+        let component = BlockApplier {
+            state: state.clone(),
+            replay: replay.clone(),
+            repositories: repo.clone(),
+            config: test_config(role),
+        };
+
+        let (input_tx, input_rx) = mpsc::channel(4);
+        let (output_tx, mut output_rx) = mpsc::channel(4);
+        let handle = tokio::spawn(async move {
+            component
+                .run(PeekableReceiver::new(input_rx), output_tx)
+                .await
+        });
+
+        input_tx
+            .send((
+                make_block_output(block_number, 1000 + block_number),
+                make_replay_record(block_number, 1000 + block_number),
+                cmd_type,
+            ))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), output_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(replay.write_log(), vec![(block_number, true)]);
+        assert_eq!(state.write_log(), vec![(block_number, true)]);
+        assert_eq!(repo.populated_blocks(), vec![block_number]);
+
+        handle.abort();
+    }
 }
