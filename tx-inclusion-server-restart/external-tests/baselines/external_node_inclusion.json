@@ -1,0 +1,27 @@
+[
+  {
+    "block_time_ms": 150,
+    "samples": 10,
+    "baseline_avg_ms": 205
+  },
+  {
+    "block_time_ms": 200,
+    "samples": 10,
+    "baseline_avg_ms": 261
+  },
+  {
+    "block_time_ms": 250,
+    "samples": 10,
+    "baseline_avg_ms": 313
+  },
+  {
+    "block_time_ms": 500,
+    "samples": 10,
+    "baseline_avg_ms": 562
+  },
+  {
+    "block_time_ms": 1000,
+    "samples": 10,
+    "baseline_avg_ms": 1070
+  }
+]

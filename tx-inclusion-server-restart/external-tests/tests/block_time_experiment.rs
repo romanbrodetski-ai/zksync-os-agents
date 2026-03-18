@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use rand::Rng;
 use zksync_os_external_tests::TestEnvironment;
 
 #[tokio::test]
@@ -21,15 +22,19 @@ async fn inclusion_latency_changes_with_block_time() -> anyhow::Result<()> {
 
     for block_time in block_times {
         let env = TestEnvironment::start_with_block_time(Some(block_time)).await?;
-        let mut latencies_ms = Vec::with_capacity(3);
+        let mut latencies_ms = Vec::with_capacity(10);
+        let mut rng = rand::rng();
 
-        for attempt in 1..=3 {
+        for attempt in 1..=10 {
+            let send_offset_ms = rng.random_range(0..=block_time.as_millis() as u64);
+            tokio::time::sleep(Duration::from_millis(send_offset_ms)).await;
             let report = env.run_basic_transfer_inclusion_only().await?;
             let inclusion_ms = report.inclusion_latency.as_millis();
             println!(
-                "block_time_ms={} attempt={} block_number={} inclusion_ms={}",
+                "block_time_ms={} attempt={} send_offset_ms={} block_number={} inclusion_ms={}",
                 block_time.as_millis(),
                 attempt,
+                send_offset_ms,
                 report.block_number,
                 inclusion_ms
             );
