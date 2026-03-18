@@ -7,3 +7,6 @@
 [submodule "pipeline-correctness/zksync-os-server"]
 	path = pipeline-correctness/zksync-os-server
 	url = https://github.com/matter-labs/zksync-os-server.git
+[submodule "tx-inclusion-server-restart/zksync-os-server"]
+	path = tx-inclusion-server-restart/zksync-os-server
+	url = https://github.com/matter-labs/zksync-os-server.git
