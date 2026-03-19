@@ -30,6 +30,7 @@ enum Agent {
     L1Settle,
     PipelineCorrectness,
     SepoliaDeploy,
+    TxInclusionServerRestart,
 }
 
 impl Agent {
@@ -39,6 +40,7 @@ impl Agent {
             Agent::L1Settle => "l1-settle",
             Agent::PipelineCorrectness => "pipeline-correctness",
             Agent::SepoliaDeploy => "sepolia-deploy",
+            Agent::TxInclusionServerRestart => "tx-inclusion-server-restart",
         }
     }
 }
