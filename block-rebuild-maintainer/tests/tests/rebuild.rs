@@ -3,7 +3,7 @@ mod command_source;
 
 use alloy::consensus::Sealed;
 use alloy::primitives::{Address, B256, TxHash, U256};
-use command_source::{MainNodeCommandSource, RebuildOptions};
+use command_source::{ConsensusNodeCommandSource, RebuildOptions};
 use chrono::Utc;
 use futures::StreamExt;
 use num::BigUint;
@@ -20,6 +20,7 @@ use zksync_os_mempool::subpools::{
 };
 use zksync_os_mempool::{Pool, PoolConfig, TxValidatorConfig};
 use zksync_os_pipeline::{PeekableReceiver, PipelineComponent};
+use zksync_os_raft::LeadershipSignal;
 use zksync_os_reth_compat::provider::ZkProviderFactory;
 use zksync_os_sequencer::execution::block_context_provider::BlockContextProvider;
 use zksync_os_sequencer::execution::{BlockCanonization, FeeConfig, FeeProvider, NoopCanonization};
@@ -248,8 +249,9 @@ fn replay_record(
     )
 }
 
+/// Constructs a ConsensusNodeCommandSource with LeadershipSignal::AlwaysLeader and collects N commands.
 async fn collect_commands(
-    source: MainNodeCommandSource<FakeReplayStorage>,
+    source: ConsensusNodeCommandSource<FakeReplayStorage>,
     count: usize,
 ) -> Vec<BlockCommand> {
     let (_input_tx, input_rx) = mpsc::channel(1);
@@ -267,7 +269,7 @@ async fn collect_commands(
     commands
 }
 
-async fn run_command_source_to_completion(source: MainNodeCommandSource<FakeReplayStorage>) {
+async fn run_command_source_to_completion(source: ConsensusNodeCommandSource<FakeReplayStorage>) {
     let (_input_tx, input_rx) = mpsc::channel(1);
     let (output_tx, _output_rx) = mpsc::channel(1);
     source
@@ -302,7 +304,7 @@ fn make_fee_provider() -> FeeProvider {
         pubdata_price_rx,
         blob_fill_ratio_rx,
         token_price_rx,
-        PubdataMode::Calldata,
+        Some(PubdataMode::Calldata),
     )
 }
 
@@ -354,25 +356,38 @@ async fn drain_txs(command: zksync_os_sequencer::model::blocks::PreparedBlockCom
     command.tx_source.stream.collect::<Vec<_>>().await
 }
 
+/// Returns the source and a sender that must be kept alive for `run_loop` not to bail.
+fn make_source(
+    storage: FakeReplayStorage,
+    starting_block: u64,
+    rebuild_options: Option<RebuildOptions>,
+) -> (ConsensusNodeCommandSource<FakeReplayStorage>, mpsc::Sender<ReplayRecord>) {
+    let (replays_tx, replays_to_execute) = mpsc::channel(1);
+    let source = ConsensusNodeCommandSource {
+        block_replay_storage: storage,
+        starting_block,
+        rebuild_options,
+        replays_to_execute,
+        leadership: LeadershipSignal::AlwaysLeader,
+    };
+    (source, replays_tx)
+}
+
 #[tokio::test]
 async fn command_source_replays_then_rebuilds_then_produces() {
-    // Fail-first validation: changed `replay_end` to `last_block_in_wal` inside the rebuild branch,
-    // which caused block 2 to be replayed instead of rebuilt and made this test fail.
     let storage = FakeReplayStorage::new([
         replay_record(1, 0, vec![]),
         replay_record(2, 5, vec![l1_tx(5)]),
         replay_record(3, 0, vec![upgrade_tx(sample_protocol_version())]),
     ]);
-    let (_replays_tx, replays_to_execute) = mpsc::channel(1);
-    let source = MainNodeCommandSource {
-        block_replay_storage: storage,
-        starting_block: 1,
-        rebuild_options: Some(RebuildOptions {
+    let (source, _keep_alive) = make_source(
+        storage,
+        1,
+        Some(RebuildOptions {
             rebuild_from_block: 2,
             blocks_to_empty: HashSet::from([3]),
         }),
-        replays_to_execute,
-    };
+    );
 
     let commands = collect_commands(source, 4).await;
 
@@ -384,22 +399,18 @@ async fn command_source_replays_then_rebuilds_then_produces() {
 
 #[tokio::test]
 async fn command_source_rebuild_from_starting_block_skips_replay_phase() {
-    // Fail-first validation: changed `replay_end` to `rebuild_from_block` in the rebuild branch,
-    // which replayed block 2 before rebuilding it and made this test fail.
     let storage = FakeReplayStorage::new([
         replay_record(2, 0, vec![]),
         replay_record(3, 0, vec![]),
     ]);
-    let (_replays_tx, replays_to_execute) = mpsc::channel(1);
-    let source = MainNodeCommandSource {
-        block_replay_storage: storage,
-        starting_block: 2,
-        rebuild_options: Some(RebuildOptions {
+    let (source, _keep_alive) = make_source(
+        storage,
+        2,
+        Some(RebuildOptions {
             rebuild_from_block: 2,
             blocks_to_empty: HashSet::new(),
         }),
-        replays_to_execute,
-    };
+    );
 
     let commands = collect_commands(source, 3).await;
 
@@ -411,19 +422,15 @@ async fn command_source_rebuild_from_starting_block_skips_replay_phase() {
 #[tokio::test]
 #[should_panic(expected = "rebuild_from_block must be >= starting_block")]
 async fn command_source_rejects_rebuild_before_starting_block() {
-    // Fail-first validation: removed the lower-bound assert in `command_source`, which let the
-    // source start and made this panic expectation fail.
     let storage = FakeReplayStorage::new([replay_record(3, 0, vec![])]);
-    let (_replays_tx, replays_to_execute) = mpsc::channel(1);
-    let source = MainNodeCommandSource {
-        block_replay_storage: storage,
-        starting_block: 3,
-        rebuild_options: Some(RebuildOptions {
+    let (source, _keep_alive) = make_source(
+        storage,
+        3,
+        Some(RebuildOptions {
             rebuild_from_block: 2,
             blocks_to_empty: HashSet::new(),
         }),
-        replays_to_execute,
-    };
+    );
 
     run_command_source_to_completion(source).await;
 }
@@ -431,27 +438,21 @@ async fn command_source_rejects_rebuild_before_starting_block() {
 #[tokio::test]
 #[should_panic(expected = "rebuild_from_block must be <= last_block_in_wal")]
 async fn command_source_rejects_rebuild_after_latest_record() {
-    // Fail-first validation: changed the upper-bound assert to a strict `< last_block_in_wal`
-    // check, which produced a different panic and made this expectation fail.
     let storage = FakeReplayStorage::new([replay_record(3, 0, vec![])]);
-    let (_replays_tx, replays_to_execute) = mpsc::channel(1);
-    let source = MainNodeCommandSource {
-        block_replay_storage: storage,
-        starting_block: 3,
-        rebuild_options: Some(RebuildOptions {
+    let (source, _keep_alive) = make_source(
+        storage,
+        3,
+        Some(RebuildOptions {
             rebuild_from_block: 4,
             blocks_to_empty: HashSet::new(),
         }),
-        replays_to_execute,
-    };
+    );
 
     run_command_source_to_completion(source).await;
 }
 
 #[tokio::test]
 async fn rebuild_prepare_filters_l1_transactions_after_priority_gap() {
-    // Fail-first validation: changed the mismatch branch to keep all replay transactions instead of
-    // filtering L1 txs, which made this test fail.
     let mut provider = make_provider(8);
     let rebuild_record = replay_record(
         5,
@@ -476,8 +477,6 @@ async fn rebuild_prepare_filters_l1_transactions_after_priority_gap() {
 
 #[tokio::test]
 async fn rebuild_prepare_keeps_transactions_when_first_l1_matches() {
-    // Fail-first validation: inverted the priority-id comparison used to decide L1 filtering,
-    // which dropped L1 txs even on the aligned case and made this test fail.
     let mut provider = make_provider(5);
     let rebuild_record = replay_record(
         5,
@@ -504,8 +503,6 @@ async fn rebuild_prepare_keeps_transactions_when_first_l1_matches() {
 
 #[tokio::test]
 async fn rebuild_prepare_empty_block_drops_all_transactions_and_uses_current_cursors() {
-    // Fail-first validation: changed `starting_l1_priority_id` to use the replay record value and
-    // changed the empty branch to keep replay txs, either of which makes this test fail.
     let mut provider = make_provider(12);
     let rebuild_record = replay_record(
         9,
@@ -559,8 +556,6 @@ async fn rebuild_prepare_empty_block_drops_all_transactions_and_uses_current_cur
 
 #[tokio::test]
 async fn rebuild_prepare_rejects_empty_upgrade_block() {
-    // Fail-first validation: removed the `make_empty && has_upgrade` guard, which made the command
-    // prepare successfully and caused this test to fail.
     let mut provider = make_provider(0);
     let error = provider
         .prepare_command(BlockCommand::Rebuild(Box::new(
@@ -627,46 +622,29 @@ fn make_provider_with_block_hashes(
     )
 }
 
-// ── New tests ──────────────────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn command_source_no_rebuild_replays_all_then_produces() {
-    // Fail-first validation: changed the `else` branch of `rebuild_options` to emit a rebuild
-    // stream instead of an empty one, so the WAL records were turned into Rebuild commands rather
-    // than Replay commands, causing the first two assertions to fail.
     let storage = FakeReplayStorage::new([
         replay_record(10, 0, vec![]),
         replay_record(11, 0, vec![]),
         replay_record(12, 0, vec![]),
     ]);
-    let (_replays_tx, replays_to_execute) = mpsc::channel(1);
-    let source = MainNodeCommandSource {
-        block_replay_storage: storage,
-        starting_block: 10,
-        rebuild_options: None,
-        replays_to_execute,
-    };
+    let (source, _keep_alive) = make_source(storage, 10, None);
 
-    // 3 replay commands + 1 produce command.
     let commands = collect_commands(source, 4).await;
 
     assert!(matches!(&commands[0], BlockCommand::Replay(r) if r.block_context.block_number == 10));
     assert!(matches!(&commands[1], BlockCommand::Replay(r) if r.block_context.block_number == 11));
     assert!(matches!(&commands[2], BlockCommand::Replay(r) if r.block_context.block_number == 12));
-    // ProduceCommand is now a unit struct: block number is tracked inside BlockContextProvider.
     assert!(matches!(&commands[3], BlockCommand::Produce(_)));
 }
 
 #[tokio::test]
 async fn rebuild_prepare_non_empty_with_no_l1_txs_keeps_all_transactions() {
-    // Fail-first validation: set `filter_l1_txs = true` in the `else` branch (None case) AND
-    // widened the filter to also drop upgrade txs, which emptied the prepared command and made
-    // this test fail with "left: 0, right: 1".
     let mut provider = make_provider(5);
     let rebuild_record = replay_record(
         7,
         0,
-        // Only an upgrade tx, no L1 priority txs.
         vec![upgrade_tx(sample_protocol_version())],
     );
 
@@ -681,15 +659,12 @@ async fn rebuild_prepare_non_empty_with_no_l1_txs_keeps_all_transactions() {
         .unwrap();
 
     let txs = drain_txs(prepared).await;
-    // The upgrade tx must survive; filter_l1_txs == false because first_l1_tx is None.
     assert_eq!(txs.len(), 1);
     assert!(matches!(txs[0].envelope(), ZkEnvelope::Upgrade(_)));
 }
 
 #[tokio::test]
 async fn rebuild_prepare_preserves_force_preimages() {
-    // Fail-first validation: replaced `force_preimages: rebuild.replay_record.force_preimages`
-    // with `force_preimages: vec![]`, which caused the assertion below to fail.
     let mut provider = make_provider(0);
     let rebuild_record = replay_record(
         8,
@@ -709,20 +684,12 @@ async fn rebuild_prepare_preserves_force_preimages() {
         .unwrap();
 
     assert_eq!(prepared.force_preimages, expected_preimages);
-    // The helper sets one (B256::with_last_byte(0xaa), vec![1,2,3]) entry; confirm it is non-empty
-    // so this test actually exercises the non-trivial case.
     assert!(!prepared.force_preimages.is_empty());
 }
 
 #[tokio::test]
 async fn rebuild_prepare_preserves_execution_version_and_protocol_version() {
-    // Fail-first validation: hardcoded execution_version to 0 in the rebuild branch, which
-    // caused the execution_version assertion to fail (left: 0, right: 3).
-    // Note: the protocol_version invariant is confirmed structurally by asserting the field
-    // equals the replay record value; a source-swap mutation is a no-op because the provider
-    // and replay record share the same sample_protocol_version() in this test.
     let mut provider = make_provider(0);
-    // sample_block_context uses execution_version=3; sample_protocol_version() is (0,30,2).
     let rebuild_record = replay_record(9, 0, vec![]);
     let expected_exec_version = rebuild_record.block_context.execution_version;
     let expected_proto_version = rebuild_record.protocol_version.clone();
@@ -751,15 +718,10 @@ async fn rebuild_prepare_preserves_execution_version_and_protocol_version() {
 
 #[tokio::test]
 async fn rebuild_prepare_uses_provider_block_hashes_not_replay_record() {
-    // Fail-first validation: changed the rebuild branch to use
-    // `rebuild.replay_record.block_context.block_hashes` instead of
-    // `self.block_hashes_for_next_block`, which caused the assertion to fail because
-    // the replay record carries Default::default() while the provider carries a distinct value.
     let mut distinct_hashes = [U256::ZERO; 256];
     distinct_hashes[0] = U256::from(0xdeadbeef_u64);
     let provider_block_hashes = BlockHashes(distinct_hashes);
 
-    // Confirm the replay record has the default (all-zero) block hashes.
     let rebuild_record = replay_record(10, 0, vec![]);
     assert_eq!(rebuild_record.block_context.block_hashes, BlockHashes::default(),
         "replay_record must have default block_hashes for this test to be meaningful");
@@ -788,41 +750,100 @@ async fn rebuild_prepare_uses_provider_block_hashes_not_replay_record() {
     );
 }
 
-/// Confirms that NoopCanonization's channel capacity is at least MAX_PRODUCED_QUEUE_SIZE (2).
-/// arrive before the first canonization is drained.
-///
-/// Fail-first validation: this test fails (hangs until timeout) on the current PR code because
-/// NoopCanonization::new() uses mpsc::channel(1) while MAX_PRODUCED_QUEUE_SIZE = 2. When
-/// tokio::select! picks the maybe_executed arm for block2 while block1's canonization is still
-/// sitting in the channel, propose(block2).await blocks forever waiting for the channel to
-/// drain — but the only drainer (the canonized arm) is unreachable while the task is blocked.
-/// The fix is to increase NoopCanonization's channel capacity to at least MAX_PRODUCED_QUEUE_SIZE.
-/// Confirms that NoopCanonization's channel capacity is at least MAX_PRODUCED_QUEUE_SIZE (2).
-///
-/// In BlockCanonizer::run, MAX_PRODUCED_QUEUE_SIZE = 2, meaning up to 2 produced blocks can be
-/// queued for canonization before the input arm is disabled. When tokio::select! picks the
-/// maybe_executed arm for block2 while block1's propose() result is still sitting in the channel,
-/// propose(block2).await deadlocks: the task blocks waiting for channel capacity, but the only
-/// consumer (the canonized arm) is unreachable because the task is stuck.
-///
-/// Fail-first validation: this test times out on the current PR code because
-/// NoopCanonization::new() creates mpsc::channel(1) while MAX_PRODUCED_QUEUE_SIZE = 2.
-/// Fix: use mpsc::channel(2) (or MAX_PRODUCED_QUEUE_SIZE) in NoopCanonization::new().
+/// NoopCanonization now uses unbounded channels, so propose() never blocks.
+/// This test confirms that proposing multiple records does not deadlock.
 #[tokio::test]
-async fn noop_canonization_channel_supports_max_produced_queue_size_proposals() {
+async fn noop_canonization_unbounded_channel_never_blocks() {
     let noop = NoopCanonization::new();
 
-    // Propose 2 blocks without draining between them.
-    // If channel capacity < 2, propose(block2).await will block forever.
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         noop.propose(replay_record(1, 0, vec![])).await.unwrap();
         noop.propose(replay_record(2, 0, vec![])).await.unwrap();
+        noop.propose(replay_record(3, 0, vec![])).await.unwrap();
     })
     .await;
 
-    result.expect(
-        "NoopCanonization channel capacity (1) < MAX_PRODUCED_QUEUE_SIZE (2): \
-         propose(block2) deadlocked because the channel was full. \
-         Fix: use mpsc::channel(2) in NoopCanonization::new().",
+    result.expect("NoopCanonization propose should never block with unbounded channel");
+}
+
+/// Replay commands now trigger a block number ordering check in BlockContextProvider.
+/// The provider's next_block_number must match the replay record's block_context.block_number.
+#[tokio::test]
+async fn replay_prepare_rejects_out_of_order_block_number() {
+    // Provider has next_block_number=1, but replay record has block_number=5.
+    let mut provider = make_provider(0);
+
+    let record = replay_record(5, 0, vec![]);
+    let error = provider
+        .prepare_command(BlockCommand::Replay(Box::new(record)))
+        .await
+        .expect_err("replay with mismatched block_number must fail");
+
+    assert!(
+        error.to_string().contains("blocks received our of order"),
+        "unexpected error: {error}"
     );
 }
+
+/// Replay command succeeds when provider's next_block_number matches.
+/// Also validates previous_block_timestamp and block_hashes consistency checks.
+#[tokio::test]
+async fn replay_prepare_accepts_matching_block_number_and_timestamps() {
+    // Build a provider with next_block_number=5 and previous_block_timestamp matching the replay record.
+    let zk_provider_factory = ZkProviderFactory::new(DummyStateHistory, DummyRepository, 270);
+    let l2_subpool = l2::in_memory(
+        zk_provider_factory,
+        PoolConfig::default(),
+        TxValidatorConfig {
+            max_input_bytes: usize::MAX,
+        },
+    );
+    let pool = Pool::new(
+        UpgradeSubpool::new(sample_protocol_version()),
+        Default::default(),
+        InteropFeeSubpool::new(91),
+        InteropRootsSubpool::new(100),
+        L1Subpool::new(16),
+        l2_subpool,
+    );
+    let (sender, _receiver) = watch::channel(None);
+
+    // The replay_record for block 5 has previous_block_timestamp = 999 + 5 = 1004
+    let record = replay_record(5, 0, vec![]);
+    let mut provider = BlockContextProvider::new(
+        0,
+        InteropRootsLogIndex { block_number: 88, index_in_block: 5 },
+        77,
+        91,
+        pool,
+        Default::default(), // block_hashes must match replay record's default
+        record.previous_block_timestamp, // match the replay record
+        5,                  // next_block_number = 5
+        Duration::from_millis(500),
+        100,
+        270,
+        10_000_000,
+        20_000_000,
+        100,
+        Duration::from_secs(1),
+        sample_protocol_version(),
+        Address::with_last_byte(0xfe),
+        sender,
+        make_fee_provider(),
+    );
+
+    let prepared = provider
+        .prepare_command(BlockCommand::Replay(Box::new(record.clone())))
+        .await
+        .expect("replay with matching block_number, timestamp and hashes must succeed");
+
+    assert_eq!(prepared.block_context.block_number, 5);
+    assert!(matches!(prepared.seal_policy, SealPolicy::UntilExhausted { allowed_to_finish_early: false }));
+    assert!(matches!(prepared.invalid_tx_policy, InvalidTxPolicy::Abort));
+    assert_eq!(prepared.expected_block_output_hash, Some(record.block_output_hash));
+}
+
+// NOTE: A test for Produce path (ProduceCommand → BlockContextProvider) is not feasible here
+// because pool.best_transactions_stream() blocks indefinitely in a test context without
+// real mempool activity. The Produce path's use of provider.next_block_number, block_time,
+// and max_transactions_in_block is verified by code inspection in knowledge/rebuild.md.
