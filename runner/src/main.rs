@@ -92,7 +92,7 @@ fn main() -> Result<()> {
             git::print_diff_summary(&submodule_path, &base, &head)?;
 
             let start = std::time::Instant::now();
-            run_ai(&cli.ai, &agent_path, &prompts::system_ctx(), &prompts::agent_prompt(&base, &head), cli.model.as_deref())?;
+            run_ai(&cli.ai, &agent_path, &prompts::agent_prompt(&base, &head), cli.model.as_deref())?;
             let duration = start.elapsed();
 
             let server_pr = gh::find_server_pr_url(&server_repo, &head);
@@ -109,7 +109,7 @@ fn main() -> Result<()> {
             git::print_diff_summary(&submodule_path, &current, &new)?;
 
             let start = std::time::Instant::now();
-            run_ai(&cli.ai, &agent_path, &prompts::system_ctx(), &prompts::agent_prompt(&current, &new), cli.model.as_deref())?;
+            run_ai(&cli.ai, &agent_path, &prompts::agent_prompt(&current, &new), cli.model.as_deref())?;
             let duration = start.elapsed();
 
             let server_pr = gh::find_server_pr_url("matter-labs/zksync-os-server", &new);
@@ -122,10 +122,10 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_ai(ai: &Ai, agent_dir: &std::path::Path, system_ctx: &str, prompt: &str, model: Option<&str>) -> Result<()> {
+fn run_ai(ai: &Ai, agent_dir: &std::path::Path, prompt: &str, model: Option<&str>) -> Result<()> {
     match ai {
-        Ai::Claude => claude::run(agent_dir, system_ctx, prompt, model),
-        Ai::Codex => codex::run(agent_dir, system_ctx, prompt, model),
+        Ai::Claude => claude::run(agent_dir, prompt, model),
+        Ai::Codex => codex::run(agent_dir, prompt, model),
     }
 }
 
