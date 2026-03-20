@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 /// Initializes the submodule if it hasn't been initialized yet.
@@ -13,7 +13,10 @@ pub fn ensure_submodule_initialized(repo_root: &Path, submodule_path: &Path) -> 
             .status()
             .context("failed to run git submodule update --init")?;
         if !status.success() {
-            bail!("failed to initialize submodule {}", submodule_path.display());
+            bail!(
+                "failed to initialize submodule {}",
+                submodule_path.display()
+            );
         }
     }
     Ok(())
@@ -46,21 +49,39 @@ pub fn resolve_ref(submodule_path: &Path, git_ref: &str) -> Result<String> {
         .with_context(|| format!("could not resolve ref '{git_ref}'"))
 }
 
+/// Returns the number of commits reachable from `to` but not from `from`.
+pub fn commit_count(submodule_path: &Path, from: &str, to: &str) -> Result<usize> {
+    let count = git(
+        submodule_path,
+        &["rev-list", "--count", &format!("{from}..{to}")],
+    )?;
+    count
+        .parse::<usize>()
+        .with_context(|| format!("failed to parse commit count for range {from}..{to}: {count}"))
+}
+
 /// Returns (base_sha, head_sha) for a PR in `repo` (e.g. "matter-labs/zksync-os-server").
 pub fn pr_shas(repo: &str, pr_number: u64) -> Result<(String, String)> {
     let out = std::process::Command::new("gh")
         .args([
-            "pr", "view",
+            "pr",
+            "view",
             &pr_number.to_string(),
-            "--repo", repo,
-            "--json", "baseRefOid,headRefOid",
-            "--jq", "[.baseRefOid, .headRefOid] | @tsv",
+            "--repo",
+            repo,
+            "--json",
+            "baseRefOid,headRefOid",
+            "--jq",
+            "[.baseRefOid, .headRefOid] | @tsv",
         ])
         .output()
         .context("failed to run gh pr view")?;
 
     if !out.status.success() {
-        bail!("gh pr view failed for PR #{pr_number}: {}", String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "gh pr view failed for PR #{pr_number}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     let line = String::from_utf8(out.stdout)?;
@@ -74,7 +95,11 @@ pub fn pr_shas(repo: &str, pr_number: u64) -> Result<(String, String)> {
 /// commits on each side (with dates) and per-file change stats.
 pub fn print_diff_summary(submodule_path: &Path, from: &str, to: &str) -> Result<()> {
     // Symmetric log: commits in from but not to (<) and in to but not from (>).
-    println!("\nUpdating {} → {}", &from[..from.len().min(12)], &to[..to.len().min(12)]);
+    println!(
+        "\nUpdating {} → {}",
+        &from[..from.len().min(12)],
+        &to[..to.len().min(12)]
+    );
     println!("\n=== Commits ===");
     let log = git(
         submodule_path,
@@ -97,7 +122,10 @@ pub fn print_diff_summary(submodule_path: &Path, from: &str, to: &str) -> Result
 
     // Diff stats: files changed, insertions, deletions.
     println!("\n=== Changed files ===");
-    let stat = git(submodule_path, &["diff", "--stat", &format!("{from}..{to}")])?;
+    let stat = git(
+        submodule_path,
+        &["diff", "--stat", &format!("{from}..{to}")],
+    )?;
     if stat.is_empty() {
         println!("(no file changes)");
     } else {
@@ -118,7 +146,12 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         .with_context(|| format!("failed to run git {}", args[0]))?;
 
     if !out.status.success() {
-        bail!("git {} failed in {}: {}", args[0], dir.display(), String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "git {} failed in {}: {}",
+            args[0],
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     Ok(String::from_utf8(out.stdout)?.trim().to_string())
 }

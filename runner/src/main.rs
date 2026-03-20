@@ -6,6 +6,7 @@ mod prompts;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -65,6 +66,21 @@ enum Command {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ReviewStrategy {
+    Combined,
+    Split,
+}
+
+impl ReviewStrategy {
+    fn as_prompt_value(self) -> &'static str {
+        match self {
+            ReviewStrategy::Combined => "combined",
+            ReviewStrategy::Split => "split",
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -90,14 +106,35 @@ fn main() -> Result<()> {
                 );
             }
             git::print_diff_summary(&submodule_path, &base, &head)?;
+            let commit_count = git::commit_count(&submodule_path, &base, &head)?;
+            run_ai(
+                &cli.ai,
+                &agent_path,
+                &prompts::system_ctx(),
+                &prompts::scoping_prompt(&base, &head, commit_count),
+                cli.model.as_deref(),
+            )?;
+            let review_strategy = prompt_review_strategy(commit_count)?;
 
             let start = std::time::Instant::now();
-            run_ai(&cli.ai, &agent_path, &prompts::agent_prompt(&base, &head), cli.model.as_deref())?;
+            run_ai(
+                &cli.ai,
+                &agent_path,
+                &prompts::system_ctx(),
+                &prompts::agent_prompt(&base, &head, review_strategy.as_prompt_value()),
+                cli.model.as_deref(),
+            )?;
             let duration = start.elapsed();
 
             let server_pr = gh::find_server_pr_url(&server_repo, &head);
             if let Some(agent_pr) = gh::latest_open_pr_url(&agent_path)? {
-                gh::prepend_pr_metadata(&agent_pr, bot_name, cli.model.as_deref(), duration, server_pr)?;
+                gh::prepend_pr_metadata(
+                    &agent_pr,
+                    bot_name,
+                    cli.model.as_deref(),
+                    duration,
+                    server_pr,
+                )?;
             }
         }
         Command::Update { target } => {
@@ -107,14 +144,35 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             git::print_diff_summary(&submodule_path, &current, &new)?;
+            let commit_count = git::commit_count(&submodule_path, &current, &new)?;
+            run_ai(
+                &cli.ai,
+                &agent_path,
+                &prompts::system_ctx(),
+                &prompts::scoping_prompt(&current, &new, commit_count),
+                cli.model.as_deref(),
+            )?;
+            let review_strategy = prompt_review_strategy(commit_count)?;
 
             let start = std::time::Instant::now();
-            run_ai(&cli.ai, &agent_path, &prompts::agent_prompt(&current, &new), cli.model.as_deref())?;
+            run_ai(
+                &cli.ai,
+                &agent_path,
+                &prompts::system_ctx(),
+                &prompts::agent_prompt(&current, &new, review_strategy.as_prompt_value()),
+                cli.model.as_deref(),
+            )?;
             let duration = start.elapsed();
 
             let server_pr = gh::find_server_pr_url("matter-labs/zksync-os-server", &new);
             if let Some(agent_pr) = gh::latest_open_pr_url(&agent_path)? {
-                gh::prepend_pr_metadata(&agent_pr, bot_name, cli.model.as_deref(), duration, server_pr)?;
+                gh::prepend_pr_metadata(
+                    &agent_pr,
+                    bot_name,
+                    cli.model.as_deref(),
+                    duration,
+                    server_pr,
+                )?;
             }
         }
     }
@@ -122,10 +180,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_ai(ai: &Ai, agent_dir: &std::path::Path, prompt: &str, model: Option<&str>) -> Result<()> {
+fn run_ai(
+    ai: &Ai,
+    agent_dir: &std::path::Path,
+    system_ctx: &str,
+    prompt: &str,
+    model: Option<&str>,
+) -> Result<()> {
+    let combined_prompt = format!("{system_ctx}\n\n{prompt}");
     match ai {
-        Ai::Claude => claude::run(agent_dir, prompt, model),
-        Ai::Codex => codex::run(agent_dir, prompt, model),
+        Ai::Claude => claude::run(agent_dir, &combined_prompt, model),
+        Ai::Codex => codex::run(agent_dir, &combined_prompt, model),
     }
 }
 
@@ -156,5 +221,40 @@ fn find_repo_root() -> Result<PathBuf> {
             return Ok(dir.to_path_buf());
         }
     }
-    anyhow::bail!("could not find a git repo root (no .git found above {})", cwd.display())
+    anyhow::bail!(
+        "could not find a git repo root (no .git found above {})",
+        cwd.display()
+    )
+}
+
+fn prompt_review_strategy(commit_count: usize) -> Result<ReviewStrategy> {
+    println!("=== Review Strategy Approval ===");
+    if commit_count <= 1 {
+        println!("Single-commit range detected. Review will proceed as one combined review.");
+        return Ok(ReviewStrategy::Combined);
+    }
+
+    println!("Choose how to proceed after reading the scoping proposal:");
+    println!("  [Enter/c] combined review");
+    println!("  [s]       split review (commit-by-commit)");
+    println!("  [q]       stop here");
+
+    loop {
+        print!("Selection: ");
+        io::stdout().flush().context("failed to flush stdout")?;
+
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .context("failed to read review strategy selection")?;
+
+        match input.trim().to_ascii_lowercase().as_str() {
+            "" | "c" | "combined" => return Ok(ReviewStrategy::Combined),
+            "s" | "split" => return Ok(ReviewStrategy::Split),
+            "q" | "quit" => anyhow::bail!("stopped before the main review"),
+            _ => {
+                println!("Enter `c`, `s`, or `q`.");
+            }
+        }
+    }
 }
