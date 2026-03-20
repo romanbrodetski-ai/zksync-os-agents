@@ -34,4 +34,5 @@ zksync_os_sequencer = { path = "zksync-os-server/lib/sequencer" }
 zksync_os_server = { path = "zksync-os-server/node/bin" }
 zksync_os_state_full_diffs = { path = "zksync-os-server/lib/state_full_diffs" }
 zksync_os_storage_api = { path = "zksync-os-server/lib/storage_api" }
+zksync_os_raft = { path = "zksync-os-server/lib/raft" }
 zksync_os_types = { path = "zksync-os-server/lib/types" }
