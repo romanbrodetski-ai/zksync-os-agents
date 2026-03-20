@@ -9,7 +9,8 @@ pub fn find_server_pr_url(server_repo: &str, head_sha: &str) -> Option<String> {
         .args([
             "api",
             &format!("repos/{server_repo}/commits/{head_sha}/pulls"),
-            "--jq", ".[0].html_url // empty",
+            "--jq",
+            ".[0].html_url // empty",
         ])
         .output()
         .ok()?;
@@ -28,10 +29,14 @@ pub fn latest_open_pr_url(dir: &Path) -> Result<Option<String>> {
     let out = std::process::Command::new("gh")
         .current_dir(dir)
         .args([
-            "pr", "list",
-            "--state", "open",
-            "--json", "url,createdAt",
-            "--jq", "max_by(.createdAt) | .url // empty",
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            "url,createdAt",
+            "--jq",
+            "max_by(.createdAt) | .url // empty",
         ])
         .output()
         .context("failed to run gh pr list")?;
@@ -75,7 +80,9 @@ pub fn prepend_pr_metadata(
     let new_title = format!("[{bot_name}] {title}");
 
     let status = std::process::Command::new("gh")
-        .args(["pr", "edit", pr_url, "--title", &new_title, "--body", &new_body])
+        .args([
+            "pr", "edit", pr_url, "--title", &new_title, "--body", &new_body,
+        ])
         .status()
         .context("failed to run gh pr edit")?;
 
@@ -101,5 +108,7 @@ fn gh_pr_field(pr_url: &str, field: &str) -> Result<String> {
         );
     }
 
-    Ok(String::from_utf8(out.stdout)?.trim_end_matches('\n').to_string())
+    Ok(String::from_utf8(out.stdout)?
+        .trim_end_matches('\n')
+        .to_string())
 }

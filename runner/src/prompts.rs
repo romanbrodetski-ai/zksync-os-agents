@@ -10,10 +10,21 @@ pub const TONE: &str = "
 - Do not comment on what is correct — only what is wrong or suspicious.
 ";
 
-pub const ISSUE_ISOLATION: &str  = "
+pub const ISSUE_ISOLATION: &str = "
 ## Isolating and Investigating Issues
  When issue is found or suspected, it is important to isolate it and investigate it.
  Use existent tests or create new ones as needed.
+";
+
+pub const SCOPING_TONE: &str = "
+## Scoping Rules
+
+- Look only at the diff and commit list.
+- Do not review correctness yet.
+- Do not edit files, update knowledge, write tests, or propose fixes yet.
+- Default to one combined review.
+- Recommend commit-by-commit review only if it is likely to improve review quality enough to justify the extra operational overhead.
+- If there is only one commit in the change range, you must recommend one combined review.
 ";
 
 pub const NEW_AGENT_PROMPT: &str = "
@@ -153,7 +164,6 @@ then define its ownership boundary,
 then write tests that would catch realistic regressions.
 ";
 
-
 /// System context appended to the agent's system prompt.
 pub fn system_ctx() -> String {
     format!(
@@ -166,14 +176,52 @@ pub fn system_ctx() -> String {
     )
 }
 
+/// Prompt for the initial scoping pass that decides whether the real review
+/// should stay combined or be done commit-by-commit.
+pub fn scoping_prompt(from_sha: &str, to_sha: &str, commit_count: usize) -> String {
+    format!(
+        "Inspect the zksync-os-server changes from {from_sha} to {to_sha}.\n\
+         There are {commit_count} commits in {to_sha} that are not in {from_sha}.\n\
+         \n\
+         Your task is only to scope the review.\n\
+         \n\
+         Produce a short packet with exactly these sections:\n\
+         1. Recommendation: `combined` or `split`\n\
+         2. Reasoning: why that recommendation best balances review quality and operational overhead\n\
+         3. Change summary: concise summary of what changed from this agent's perspective\n\
+         4. Risk flags: anything that makes review harder or riskier\n\
+         \n\
+         `split` means commit-by-commit review.\n\
+         Recommend `split` only if a combined review is likely to be materially worse.\n\
+         If there is only one commit, you must recommend `combined`.\n\
+         \n\
+         {SCOPING_TONE}"
+    )
+}
+
 /// Prompt for all agent invocations. The agent decides how best to do the work.
-pub fn agent_prompt(from_sha: &str, to_sha: &str) -> String {
+pub fn agent_prompt(from_sha: &str, to_sha: &str, review_strategy: &str) -> String {
+    let review_instructions = match review_strategy {
+        "split" => {
+            "Review the change set commit-by-commit.\n\
+             Keep the review structured around individual commits where that helps isolate reasoning, \
+             but still deliver one final PR in this repo."
+        }
+        _ => {
+            "Review the change set as one combined unit.\n\
+             Do not split the review commit-by-commit unless you become blocked by missing context."
+        }
+    };
+
     format!(
         "Review and update knowledge and tests for the zksync-os-server changes from {from_sha} to {to_sha}.\n\
          Your current knowledge and tests are for {from_sha}. 
-        
-        You should deliver A PR in this repo (zksync-os-agents) containing the tests and knowledge updates - 
-        and the updated submodule `zksync-os-server` to {to_sha}. 
+        \n\
+        Review strategy selected by the human after the scoping pass: {review_strategy}.\n\
+        {review_instructions}\n\
+        \n\
+        You should deliver A PR in this repo (zksync-os-agents) containing the tests and knowledge updates - \n\
+        and the updated submodule `zksync-os-server` to {to_sha}. \n\
         The PR description should include:
         - A short summary of the server changes this update covers\n\
         - Severity of issues found (none | low | medium | high | critical)\n\
