@@ -1,16 +1,18 @@
 use alloy::eips::BlockId;
 use alloy::network::EthereumWallet;
+use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder};
-use alloy::network::TransactionBuilder;
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use anyhow::{Context, anyhow};
-use reqwest::StatusCode;
-use serde_json::json;
+use flate2::read::GzDecoder;
 use k256::ecdsa::SigningKey;
 use k256::elliptic_curve::rand_core::OsRng;
+use reqwest::StatusCode;
+use serde_json::json;
 use std::fs::File;
+use std::io::Read;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -18,8 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::process::{Child, Command};
 use url::Url;
 
-const RICH_PRIVATE_KEY: &str =
-    "0x7726827caac94a7f9e1b160f7ea819f172f7b6f9d2a97f992c38edeab82d4110";
+const RICH_PRIVATE_KEY: &str = "0x7726827caac94a7f9e1b160f7ea819f172f7b6f9d2a97f992c38edeab82d4110";
 
 pub struct TestEnvironment {
     repo_root: PathBuf,
@@ -93,6 +94,7 @@ impl TestEnvironment {
         let artifacts_dir = create_artifacts_dir()?;
         let logs_dir = artifacts_dir.join("logs");
         std::fs::create_dir_all(&logs_dir)?;
+        let l1_state_path = unpack_l1_state(&repo_root, &artifacts_dir)?;
 
         let anvil_port = pick_unused_port()?;
         let rpc_port = pick_unused_port()?;
@@ -107,7 +109,7 @@ impl TestEnvironment {
         let mut anvil_cmd = Command::new("anvil");
         anvil_cmd
             .arg("--load-state")
-            .arg(repo_root.join("local-chains/v30.2/l1-state.json"))
+            .arg(&l1_state_path)
             .arg("--port")
             .arg(anvil_port.to_string());
         let anvil = spawn_logged("anvil", &mut anvil_cmd, &anvil_log)
@@ -197,8 +199,13 @@ impl TestEnvironment {
             .block_number
             .ok_or_else(|| anyhow!("receipt is missing block number"))?;
 
-        wait_for_block_tag(&provider, block_number, BlockId::safe(), Duration::from_secs(180))
-            .await?;
+        wait_for_block_tag(
+            &provider,
+            block_number,
+            BlockId::safe(),
+            Duration::from_secs(180),
+        )
+        .await?;
         let safe_latency = submitted_at.elapsed();
 
         wait_for_block_tag(
@@ -279,6 +286,7 @@ impl TestEnvironment {
         .context("failed to restart zksync-os-server")?;
         self.server = Some(server);
         wait_for_health(&self.status_url, Duration::from_secs(120)).await?;
+        wait_for_rpc(&self.rpc_url, Duration::from_secs(120)).await?;
 
         Ok(())
     }
@@ -300,7 +308,10 @@ impl TestEnvironment {
             .await
             .context("failed to call eth_getTransactionReceipt")?;
         let response: serde_json::Value = response.json().await?;
-        Ok(response["result"].clone().as_object().map(|_| response["result"].clone()))
+        Ok(response["result"]
+            .clone()
+            .as_object()
+            .map(|_| response["result"].clone()))
     }
 
     pub async fn send_basic_transfer(&self) -> anyhow::Result<B256> {
@@ -489,7 +500,10 @@ impl ExternalNode {
             .await
             .context("failed to call eth_getTransactionReceipt on external node")?;
         let response: serde_json::Value = response.json().await?;
-        Ok(response["result"].clone().as_object().map(|_| response["result"].clone()))
+        Ok(response["result"]
+            .clone()
+            .as_object()
+            .map(|_| response["result"].clone()))
     }
 
     pub async fn wait_for_receipt_json(&self, tx_hash: B256) -> anyhow::Result<serde_json::Value> {
@@ -518,7 +532,12 @@ impl ExternalNode {
         Ok(*pending.tx_hash())
     }
 
-    pub async fn restart(&mut self, l1_rpc_url: &str, main_node_rpc_url: &str, main_node_record: &str) -> anyhow::Result<()> {
+    pub async fn restart(
+        &mut self,
+        l1_rpc_url: &str,
+        main_node_rpc_url: &str,
+        main_node_record: &str,
+    ) -> anyhow::Result<()> {
         if let Some(server) = self.server.as_mut() {
             server.kill().await;
         }
@@ -535,6 +554,7 @@ impl ExternalNode {
         .context("failed to restart external node")?;
         self.server = Some(server);
         wait_for_health(&self.status_url, Duration::from_secs(120)).await?;
+        wait_for_rpc(&self.rpc_url, Duration::from_secs(120)).await?;
         Ok(())
     }
 }
@@ -584,11 +604,23 @@ async fn spawn_main_node(
         .env("network_enabled", "true")
         .env("network_address", "127.0.0.1")
         .env("network_port", config.network_port.to_string())
-        .env("network_secret_key", secret_key_to_hex(&config.network_secret_key))
+        .env(
+            "network_secret_key",
+            secret_key_to_hex(&config.network_secret_key),
+        )
         .env("status_server_enabled", "true")
-        .env("status_server_address", format!("127.0.0.1:{}", config.status_port))
-        .env("observability_prometheus_port", config.prometheus_port.to_string())
-        .env("prover_api_address", format!("127.0.0.1:{}", config.prover_api_port))
+        .env(
+            "status_server_address",
+            format!("127.0.0.1:{}", config.status_port),
+        )
+        .env(
+            "observability_prometheus_port",
+            config.prometheus_port.to_string(),
+        )
+        .env(
+            "prover_api_address",
+            format!("127.0.0.1:{}", config.prover_api_port),
+        )
         .env("prover_api_proof_storage_path", &config.proof_storage_path)
         .env("RUST_LOG", "info");
     if let Some(block_time) = config.block_time {
@@ -622,16 +654,28 @@ async fn spawn_external_node(
         .env("network_enabled", "true")
         .env("network_address", "127.0.0.1")
         .env("network_port", config.network_port.to_string())
-        .env("network_secret_key", secret_key_to_hex(&config.network_secret_key))
+        .env(
+            "network_secret_key",
+            secret_key_to_hex(&config.network_secret_key),
+        )
         .env(
             "network_boot_nodes__JSON",
             serde_json::to_string(&vec![main_node_record.to_owned()])?,
         )
         .env("l1_sender_pubdata_mode__JSON", "null")
         .env("status_server_enabled", "true")
-        .env("status_server_address", format!("127.0.0.1:{}", config.status_port))
-        .env("observability_prometheus_port", config.prometheus_port.to_string())
-        .env("prover_api_address", format!("127.0.0.1:{}", config.prover_api_port))
+        .env(
+            "status_server_address",
+            format!("127.0.0.1:{}", config.status_port),
+        )
+        .env(
+            "observability_prometheus_port",
+            config.prometheus_port.to_string(),
+        )
+        .env(
+            "prover_api_address",
+            format!("127.0.0.1:{}", config.prover_api_port),
+        )
         .env("prover_api_proof_storage_path", &config.proof_storage_path)
         .env("RUST_LOG", "info");
     let server = spawn_logged("external-node", &mut server_cmd, log_path).await?;
@@ -652,10 +696,7 @@ async fn ensure_server_binary(repo_root: &Path) -> anyhow::Result<PathBuf> {
         .await
         .context("failed to query cargo metadata for zksync-os-server")?;
     if !metadata.status.success() {
-        anyhow::bail!(
-            "cargo metadata failed with status {}",
-            metadata.status
-        );
+        anyhow::bail!("cargo metadata failed with status {}", metadata.status);
     }
 
     let metadata_json: serde_json::Value = serde_json::from_slice(&metadata.stdout)
@@ -664,9 +705,6 @@ async fn ensure_server_binary(repo_root: &Path) -> anyhow::Result<PathBuf> {
         .as_str()
         .ok_or_else(|| anyhow!("cargo metadata missing target_directory"))?;
     let binary_path = PathBuf::from(target_directory).join("debug/zksync-os-server");
-    if binary_path.exists() {
-        return Ok(binary_path);
-    }
 
     let status = Command::new("cargo")
         .arg("build")
@@ -689,8 +727,25 @@ async fn ensure_server_binary(repo_root: &Path) -> anyhow::Result<PathBuf> {
     Ok(binary_path)
 }
 
+fn unpack_l1_state(repo_root: &Path, artifacts_dir: &Path) -> anyhow::Result<PathBuf> {
+    let compressed_path = repo_root.join("local-chains/v30.2/l1-state.json.gz");
+    let output_path = artifacts_dir.join("l1-state.json");
+    let compressed = std::fs::read(&compressed_path)
+        .with_context(|| format!("failed to read {}", compressed_path.display()))?;
+    let mut decoder = GzDecoder::new(compressed.as_slice());
+    let mut decoded = Vec::new();
+    decoder
+        .read_to_end(&mut decoded)
+        .with_context(|| format!("failed to decompress {}", compressed_path.display()))?;
+    std::fs::write(&output_path, decoded)
+        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    Ok(output_path)
+}
+
 fn default_signer() -> anyhow::Result<PrivateKeySigner> {
-    RICH_PRIVATE_KEY.parse().context("failed to parse rich private key")
+    RICH_PRIVATE_KEY
+        .parse()
+        .context("failed to parse rich private key")
 }
 
 fn default_provider(rpc_url: String) -> anyhow::Result<impl Provider + Clone> {
@@ -704,7 +759,9 @@ pub fn provider_for_rpc_and_signer(
     let wallet = EthereumWallet::from(signer);
     let url = Url::parse(&rpc_url)?;
     let provider = ProviderBuilder::new().wallet(wallet).connect_http(url);
-    provider.client().set_poll_interval(Duration::from_millis(10));
+    provider
+        .client()
+        .set_poll_interval(Duration::from_millis(10));
     Ok(provider)
 }
 
